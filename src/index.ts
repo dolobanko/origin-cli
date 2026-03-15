@@ -17,6 +17,7 @@ import { disableCommand } from './commands/disable.js';
 import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit, handlePrePush } from './commands/hooks.js';
 import { explainCommand } from './commands/explain.js';
+import { askCommand } from './commands/ask.js';
 import { doctorCommand } from './commands/doctor.js';
 import { resetCommand } from './commands/reset.js';
 import { cleanCommand } from './commands/clean.js';
@@ -81,6 +82,14 @@ program.command('explain [sessionId]')
   .option('--summarize', 'Generate AI-powered summary (intent, outcome, learnings, friction)')
   .option('--json', 'Output as JSON')
   .action(explainCommand);
+program.command('ask <query>')
+  .description('Ask about AI-generated code — find the session and prompts behind any file or change')
+  .option('-f, --file <path>', 'Ask about a specific file')
+  .option('-l, --line <n>', 'Focus on a specific line number')
+  .option('-s, --session <id>', 'Search within a specific session')
+  .option('--limit <n>', 'Max results', '5')
+  .action(askCommand);
+
 program.command('doctor')
   .description('Scan for and fix stuck/orphaned sessions')
   .option('-f, --fix', 'Auto-fix issues found')
