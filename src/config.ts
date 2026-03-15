@@ -75,3 +75,27 @@ export function clearRepoConfig(repoPath: string) {
   const configPath = path.join(repoPath, '.origin.json');
   try { fs.unlinkSync(configPath); } catch { /* ignore */ }
 }
+
+// ── Mode detection ────────────────────────────────────────────────────────────
+
+/**
+ * Returns true if CLI is connected to the Origin platform (has API key configured).
+ * When false, CLI operates in standalone/local-only mode.
+ */
+export function isConnectedMode(): boolean {
+  const config = loadConfig();
+  return !!(config?.apiKey);
+}
+
+/**
+ * Guard for commands that require the Origin platform.
+ * Returns false (and prints message) if in standalone mode.
+ */
+export function requirePlatform(commandName: string): boolean {
+  if (!isConnectedMode()) {
+    console.log(`\n  'origin ${commandName}' requires the Origin platform.`);
+    console.log('  Run: origin login\n');
+    return false;
+  }
+  return true;
+}

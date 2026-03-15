@@ -1,4 +1,5 @@
-import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig } from '../config.js';
+import { loadConfig, loadAgentConfig, saveAgentConfig, loadRepoConfig, isConnectedMode, ensureConfigDir } from '../config.js';
+import crypto from 'crypto';
 import { detectTools } from '../tools-detector.js';
 import { api } from '../api.js';
 import { parseTranscript, estimateCost, formatTranscriptForDisplay, extractPromptFileMappings, setActivePricing } from '../transcript.js';
@@ -278,21 +279,38 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   debugLog('session-start', 'begin', { agentSlug, inputKeys: Object.keys(input) });
 
   const config = loadConfig();
-  const agentConfig = loadAgentConfig();
-  if (!config || !agentConfig) {
-    debugLog('session-start', 'ABORT: missing config', { hasConfig: !!config, hasAgentConfig: !!agentConfig });
-    return;
+  let agentConfig = loadAgentConfig();
+  const connected = isConnectedMode();
+
+  // In standalone mode, create minimal agent config if missing
+  if (!agentConfig) {
+    if (connected) {
+      debugLog('session-start', 'ABORT: missing agent config (run origin init)', { hasConfig: !!config });
+      return;
+    }
+    // Auto-create minimal agent config for standalone
+    agentConfig = {
+      machineId: crypto.randomUUID(),
+      hostname: os.hostname(),
+      detectedTools: detectTools(),
+      orgId: 'local',
+    };
+    ensureConfigDir();
+    saveAgentConfig(agentConfig);
+    debugLog('session-start', 'auto-created agent config (standalone)', { machineId: agentConfig.machineId });
   }
 
   // Fetch latest model pricing from API (non-blocking, falls back to defaults)
-  try {
-    const { pricing } = await api.getPricing();
-    if (pricing && typeof pricing === 'object') {
-      setActivePricing(pricing);
-      debugLog('session-start', 'pricing fetched from API', { models: Object.keys(pricing).length });
+  if (connected) {
+    try {
+      const { pricing } = await api.getPricing();
+      if (pricing && typeof pricing === 'object') {
+        setActivePricing(pricing);
+        debugLog('session-start', 'pricing fetched from API', { models: Object.keys(pricing).length });
+      }
+    } catch (err: any) {
+      debugLog('session-start', 'pricing fetch failed, using defaults', { error: err.message });
     }
-  } catch (err: any) {
-    debugLog('session-start', 'pricing fetch failed, using defaults', { error: err.message });
   }
 
   // Use cwd from hook input (Claude Code passes this) or fall back to process.cwd()
@@ -350,16 +368,18 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     debugLog('session-start', 'migrating legacy untagged session', {
       oldSessionId: legacyState.sessionId,
     });
-    try {
-      const durationMs = Date.now() - new Date(legacyState.startedAt).getTime();
-      await api.endSession({
-        sessionId: legacyState.sessionId,
-        prompt: legacyState.prompts.join('\n\n---\n\n') || undefined,
-        durationMs: durationMs > 0 ? durationMs : undefined,
-        branch: legacyState.branch || undefined,
-      });
-    } catch (err: any) {
-      debugLog('session-start', 'legacy session end failed (non-fatal)', { message: err.message });
+    if (connected) {
+      try {
+        const durationMs = Date.now() - new Date(legacyState.startedAt).getTime();
+        await api.endSession({
+          sessionId: legacyState.sessionId,
+          prompt: legacyState.prompts.join('\n\n---\n\n') || undefined,
+          durationMs: durationMs > 0 ? durationMs : undefined,
+          branch: legacyState.branch || undefined,
+        });
+      } catch (err: any) {
+        debugLog('session-start', 'legacy session end failed (non-fatal)', { message: err.message });
+      }
     }
     clearSessionState(hookCwd);
     if (repoPath !== hookCwd) clearSessionState(repoPath);
@@ -411,16 +431,18 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       agentConfig.detectedTools = freshTools;
       agentConfig.lastToolDetection = new Date().toISOString();
       saveAgentConfig(agentConfig);
-      // Update server with new tool list
-      try {
-        await api.registerMachine({
-          hostname: agentConfig.hostname,
-          machineId: agentConfig.machineId,
-          detectedTools: freshTools,
-        });
-        debugLog('session-start', 'machine re-registered with updated tools');
-      } catch (regErr: any) {
-        debugLog('session-start', 'machine re-registration failed (non-fatal)', { message: regErr.message });
+      // Update server with new tool list (only in connected mode)
+      if (connected) {
+        try {
+          await api.registerMachine({
+            hostname: agentConfig.hostname,
+            machineId: agentConfig.machineId,
+            detectedTools: freshTools,
+          });
+          debugLog('session-start', 'machine re-registered with updated tools');
+        } catch (regErr: any) {
+          debugLog('session-start', 'machine re-registration failed (non-fatal)', { message: regErr.message });
+        }
       }
     } else {
       debugLog('session-start', 'tools unchanged', { tools: freshTools });
@@ -430,21 +452,37 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
 
   try {
-    debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, repoUrl, agentSlug: finalAgentSlug, branch });
-    const result = await api.startSession({
-      machineId: agentConfig.machineId,
-      prompt: '',
-      model,
-      repoPath,
-      repoUrl: repoUrl || undefined,
-      agentSlug: finalAgentSlug,
-      branch: branch || undefined,
-      hostname: agentConfig.hostname || undefined,
-    });
-    debugLog('session-start', 'api returned', { sessionId: result.sessionId });
+    let sessionId: string;
+    let agentSystemPrompt: string | undefined;
+    let activePolicies: string[] | undefined;
+    let enforcementRules: any[] | undefined;
+
+    if (connected) {
+      // ── Connected mode: register session with Origin platform ──
+      debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, repoUrl, agentSlug: finalAgentSlug, branch });
+      const result = await api.startSession({
+        machineId: agentConfig.machineId,
+        prompt: '',
+        model,
+        repoPath,
+        repoUrl: repoUrl || undefined,
+        agentSlug: finalAgentSlug,
+        branch: branch || undefined,
+        hostname: agentConfig.hostname || undefined,
+      });
+      sessionId = result.sessionId;
+      agentSystemPrompt = result.agentSystemPrompt || undefined;
+      activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
+      enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
+      debugLog('session-start', 'api returned', { sessionId });
+    } else {
+      // ── Standalone mode: generate local session ID ──
+      sessionId = `local-${crypto.randomUUID()}`;
+      debugLog('session-start', 'standalone session', { sessionId });
+    }
 
     const state: SessionState = {
-      sessionId: result.sessionId,
+      sessionId,
       claudeSessionId,
       transcriptPath,
       model,
@@ -454,28 +492,33 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       headShaAtStart: getHeadSha(hookCwd),
       branch,
       sessionTag,
-      agentSystemPrompt: result.agentSystemPrompt || undefined,
-      activePolicies: result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined,
-      enforcementRules: result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined,
+      agentSystemPrompt,
+      activePolicies,
+      enforcementRules,
     };
 
     // Save to tagged file — each concurrent session gets its own state file
     saveSessionState(state, repoPath, sessionTag);
-    debugLog('session-start', 'state saved', { sessionId: result.sessionId, sessionTag });
+    debugLog('session-start', 'state saved', { sessionId, sessionTag });
 
-    // Start background heartbeat daemon (pings API every 30s to keep session RUNNING)
-    startHeartbeat(result.sessionId, config.apiUrl || 'https://origin-platform.fly.dev', config.apiKey);
-    debugLog('session-start', 'heartbeat started', { sessionId: result.sessionId });
+    // Start background heartbeat daemon (only in connected mode)
+    if (connected && config) {
+      startHeartbeat(sessionId, config.apiUrl || 'https://origin-platform.fly.dev', config.apiKey);
+      debugLog('session-start', 'heartbeat started', { sessionId });
+    }
 
     // Build system message: agent system prompt first, then tracking notice + policies
     let systemMsg = '';
-    if (result.agentSystemPrompt) {
-      systemMsg += result.agentSystemPrompt + '\n\n';
+    if (agentSystemPrompt) {
+      systemMsg += agentSystemPrompt + '\n\n';
     }
     systemMsg += 'Origin: Session tracking active \u2014 prompts, files, and tokens will be captured.';
-    if (result.activePolicies && Array.isArray(result.activePolicies) && result.activePolicies.length > 0) {
+    if (!connected) {
+      systemMsg += ' (standalone mode)';
+    }
+    if (activePolicies && Array.isArray(activePolicies) && activePolicies.length > 0) {
       systemMsg += '\n\nActive policies for this session:\n' +
-        result.activePolicies.map((p: string) => `- ${p}`).join('\n');
+        activePolicies.map((p: string) => `- ${p}`).join('\n');
     }
 
     const output = JSON.stringify({ systemMessage: systemMsg });
@@ -519,27 +562,46 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   if (!state) {
     // No existing session at all — auto-create one (first prompt without SessionStart)
     debugLog('user-prompt-submit', 'no session state — attempting auto-create', { hookCwd });
-    const config = loadConfig();
-    const agentConfig = loadAgentConfig();
+    const autoConfig = loadConfig();
+    let autoAgentConfig = loadAgentConfig();
     const repoPath = discoverGitRoot(hookCwd);
-    if (config && agentConfig && repoPath) {
+    if (repoPath) {
       try {
+        // Auto-create agent config in standalone mode
+        if (!autoAgentConfig) {
+          autoAgentConfig = {
+            machineId: crypto.randomUUID(),
+            hostname: os.hostname(),
+            detectedTools: detectTools(),
+            orgId: 'local',
+          };
+          ensureConfigDir();
+          saveAgentConfig(autoAgentConfig);
+        }
         const repoConfig = loadRepoConfig(repoPath);
-        const finalAgentSlug = repoConfig?.agent || agentSlug || agentConfig.agentSlug || undefined;
+        const finalAgentSlug = repoConfig?.agent || agentSlug || autoAgentConfig.agentSlug || undefined;
         const branch = getBranch(hookCwd);
         const model = input.model || (finalAgentSlug === 'gemini' ? 'gemini' : finalAgentSlug === 'codex' ? 'codex' : 'claude');
-        const result = await api.startSession({
-          machineId: agentConfig.machineId,
-          prompt: input.prompt || '',
-          model,
-          repoPath,
-          agentSlug: finalAgentSlug,
-          branch: branch || undefined,
-        });
         const autoTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
-        debugLog('user-prompt-submit', 'auto-created session', { sessionId: result.sessionId, sessionTag: autoTag });
+
+        let sessionId: string;
+        if (isConnectedMode() && autoConfig) {
+          const result = await api.startSession({
+            machineId: autoAgentConfig.machineId,
+            prompt: input.prompt || '',
+            model,
+            repoPath,
+            agentSlug: finalAgentSlug,
+            branch: branch || undefined,
+          });
+          sessionId = result.sessionId;
+        } else {
+          sessionId = `local-${crypto.randomUUID()}`;
+        }
+
+        debugLog('user-prompt-submit', 'auto-created session', { sessionId, sessionTag: autoTag });
         state = {
-          sessionId: result.sessionId,
+          sessionId,
           claudeSessionId: input.session_id || '',
           transcriptPath: input.transcript_path || '',
           model,
@@ -574,10 +636,10 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
     debugLog('user-prompt-submit', 'prompt saved', { promptCount: state.prompts.length, sessionId: state.sessionId, tag: state.sessionTag });
 
-    // ── Heartbeat: send incremental update to API on every prompt ──
+    // ── Heartbeat: send incremental update to API on every prompt (connected mode only) ──
     try {
       const config = loadConfig();
-      if (config) {
+      if (config && isConnectedMode()) {
         const durationMs = Date.now() - new Date(state.startedAt).getTime();
 
         // Try to parse transcript for live token/cost data
@@ -630,11 +692,12 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
   debugLog('stop', 'begin', { cwd: input.cwd });
 
   const config = loadConfig();
+  const connected = isConnectedMode();
   const hookCwd = input.cwd || process.cwd();
   const found = findStateForHook(hookCwd, input.session_id, agentSlug);
   const state = found?.state || null;
-  if (!config || !state) {
-    debugLog('stop', 'ABORT: missing config or state', { hasConfig: !!config, hasState: !!state });
+  if (!state) {
+    debugLog('stop', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
     return;
   }
 
@@ -681,35 +744,37 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     const promptMappings = extractPromptFileMappings(state.transcriptPath);
     debugLog('stop', 'prompt mappings', { count: promptMappings.length });
 
-    debugLog('stop', 'calling api.updateSession', {
-      sessionId: state.sessionId,
-      promptCount: prompts.length,
-      model,
-      tokensUsed: parsed.tokensUsed,
-      inputTokens: parsed.inputTokens,
-      outputTokens: parsed.outputTokens,
-      cacheReadTokens: parsed.cacheReadTokens,
-      cacheCreationTokens: parsed.cacheCreationTokens,
-      costUsd,
-      promptMappings: promptMappings.length,
-    });
-    await api.updateSession(state.sessionId, {
-      prompt: joinedPrompt || undefined,
-      transcript: displayTranscript || undefined,
-      model: model !== 'unknown' ? model : undefined,
-      filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
-      tokensUsed: parsed.tokensUsed || undefined,
-      inputTokens: parsed.inputTokens || undefined,
-      outputTokens: parsed.outputTokens || undefined,
-      toolCalls: parsed.toolCalls || undefined,
-      durationMs: durationMs > 0 ? durationMs : undefined,
-      costUsd: costUsd > 0 ? costUsd : undefined,
-      promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
-    });
-    debugLog('stop', 'update complete');
+    if (connected) {
+      debugLog('stop', 'calling api.updateSession', {
+        sessionId: state.sessionId,
+        promptCount: prompts.length,
+        model,
+        tokensUsed: parsed.tokensUsed,
+        inputTokens: parsed.inputTokens,
+        outputTokens: parsed.outputTokens,
+        cacheReadTokens: parsed.cacheReadTokens,
+        cacheCreationTokens: parsed.cacheCreationTokens,
+        costUsd,
+        promptMappings: promptMappings.length,
+      });
+      await api.updateSession(state.sessionId, {
+        prompt: joinedPrompt || undefined,
+        transcript: displayTranscript || undefined,
+        model: model !== 'unknown' ? model : undefined,
+        filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
+        tokensUsed: parsed.tokensUsed || undefined,
+        inputTokens: parsed.inputTokens || undefined,
+        outputTokens: parsed.outputTokens || undefined,
+        toolCalls: parsed.toolCalls || undefined,
+        durationMs: durationMs > 0 ? durationMs : undefined,
+        costUsd: costUsd > 0 ? costUsd : undefined,
+        promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
+      });
+      debugLog('stop', 'update complete');
+    }
 
     // Write session files to origin-sessions branch + push on every Stop
-    const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
+    const apiUrl = config?.apiUrl || 'https://origin-platform.fly.dev';
     const gitCapture = captureGitState(state.repoPath, state.headShaAtStart);
     const writeData = buildSessionWriteData({
       state, parsed, promptMappings, gitCapture,
@@ -728,11 +793,12 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
   debugLog('session-end', 'begin', { cwd: input.cwd });
 
   const config = loadConfig();
+  const connected = isConnectedMode();
   const hookCwd = input.cwd || process.cwd();
   const found = findStateForHook(hookCwd, input.session_id, agentSlug);
   const state = found?.state || null;
-  if (!config || !state) {
-    debugLog('session-end', 'ABORT: missing config or state', { hasConfig: !!config, hasState: !!state });
+  if (!state) {
+    debugLog('session-end', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
     return;
   }
 
@@ -779,38 +845,40 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
     // Extract prompt → file change mappings from transcript
     const promptMappings = extractPromptFileMappings(state.transcriptPath);
 
-    debugLog('session-end', 'calling api.endSession', {
-      sessionId: state.sessionId,
-      promptCount: prompts.length,
-      filesCount: parsed.filesChanged.length,
-      tokensUsed: parsed.tokensUsed,
-      inputTokens: parsed.inputTokens,
-      outputTokens: parsed.outputTokens,
-      durationMs,
-      costUsd,
-      hasDiff: !!gitCapture.diff,
-    });
+    if (connected) {
+      debugLog('session-end', 'calling api.endSession', {
+        sessionId: state.sessionId,
+        promptCount: prompts.length,
+        filesCount: parsed.filesChanged.length,
+        tokensUsed: parsed.tokensUsed,
+        inputTokens: parsed.inputTokens,
+        outputTokens: parsed.outputTokens,
+        durationMs,
+        costUsd,
+        hasDiff: !!gitCapture.diff,
+      });
 
-    await api.endSession({
-      sessionId: state.sessionId,
-      prompt: joinedPrompt || undefined,
-      summary: parsed.summary || undefined,
-      transcript: displayTranscript || undefined,
-      filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
-      tokensUsed: parsed.tokensUsed || undefined,
-      inputTokens: parsed.inputTokens || undefined,
-      outputTokens: parsed.outputTokens || undefined,
-      toolCalls: parsed.toolCalls || undefined,
-      durationMs: durationMs > 0 ? durationMs : undefined,
-      costUsd: costUsd > 0 ? costUsd : undefined,
-      gitCapture: gitCapture.diff ? gitCapture : undefined,
-      promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
-      branch: getBranch(hookCwd) || undefined,
-    });
-    debugLog('session-end', 'api.endSession complete');
+      await api.endSession({
+        sessionId: state.sessionId,
+        prompt: joinedPrompt || undefined,
+        summary: parsed.summary || undefined,
+        transcript: displayTranscript || undefined,
+        filesChanged: parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
+        tokensUsed: parsed.tokensUsed || undefined,
+        inputTokens: parsed.inputTokens || undefined,
+        outputTokens: parsed.outputTokens || undefined,
+        toolCalls: parsed.toolCalls || undefined,
+        durationMs: durationMs > 0 ? durationMs : undefined,
+        costUsd: costUsd > 0 ? costUsd : undefined,
+        gitCapture: gitCapture.diff ? gitCapture : undefined,
+        promptChanges: promptMappings.length > 0 ? promptMappings : undefined,
+        branch: getBranch(hookCwd) || undefined,
+      });
+      debugLog('session-end', 'api.endSession complete');
+    }
 
     // Write session files to origin-sessions branch (directory per session)
-    const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
+    const apiUrl = config?.apiUrl || 'https://origin-platform.fly.dev';
     const writeData = buildSessionWriteData({
       state, parsed, promptMappings, gitCapture,
       status: 'ended', apiUrl,
@@ -845,17 +913,19 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
 
     // Even if transcript parsing or other steps fail, still mark the session as ended
     // so it doesn't stay RUNNING forever on the dashboard.
-    try {
-      const durationMs = Date.now() - new Date(state.startedAt).getTime();
-      await api.endSession({
-        sessionId: state.sessionId,
-        prompt: state.prompts.join('\n\n---\n\n') || undefined,
-        durationMs: durationMs > 0 ? durationMs : undefined,
-        branch: getBranch(hookCwd) || undefined,
-      });
-      debugLog('session-end', 'fallback endSession succeeded');
-    } catch (fallbackErr: any) {
-      debugLog('session-end', 'fallback endSession also failed', { message: fallbackErr.message });
+    if (connected) {
+      try {
+        const durationMs = Date.now() - new Date(state.startedAt).getTime();
+        await api.endSession({
+          sessionId: state.sessionId,
+          prompt: state.prompts.join('\n\n---\n\n') || undefined,
+          durationMs: durationMs > 0 ? durationMs : undefined,
+          branch: getBranch(hookCwd) || undefined,
+        });
+        debugLog('session-end', 'fallback endSession succeeded');
+      } catch (fallbackErr: any) {
+        debugLog('session-end', 'fallback endSession also failed', { message: fallbackErr.message });
+      }
     }
   } finally {
     // Stop the heartbeat daemon
@@ -880,10 +950,7 @@ export async function handlePostCommit(): Promise<void> {
   debugLog('post-commit', '=== GIT HOOK INVOKED ===', { pid: process.pid, cwd: process.cwd() });
 
   const config = loadConfig();
-  if (!config) {
-    debugLog('post-commit', 'SKIP: no config');
-    return;
-  }
+  const connected = isConnectedMode();
 
   const hookCwd = process.cwd();
   const repoPath = getGitRoot(hookCwd);
@@ -937,7 +1004,7 @@ export async function handlePostCommit(): Promise<void> {
   const currentBranch = getBranch(hookCwd);
 
   // Add Origin-Session trailer to commit message (like Entire's Entire-Checkpoint trailer)
-  const apiUrl = config.apiUrl || 'https://origin-platform.fly.dev';
+  const apiUrl = config?.apiUrl || 'https://origin-platform.fly.dev';
 
   // Get ALL active sessions for this repo (concurrent session support)
   const activeSessions = listActiveSessions(hookCwd);
@@ -956,7 +1023,7 @@ export async function handlePostCommit(): Promise<void> {
   }
 
   // F13: Respect config.commitLinking setting (always|prompt|never)
-  const commitLinkingConfig = config.commitLinking || 'always';
+  const commitLinkingConfig = config?.commitLinking || 'always';
   if (state && commitLinkingConfig !== 'never') {
     try {
       // Only add trailer if not already present
@@ -1009,17 +1076,19 @@ export async function handlePostCommit(): Promise<void> {
       linesRemoved,
     };
 
-    for (const s of activeSessions) {
-      try {
-        debugLog('post-commit', 'sending incremental update', { sessionId: s.sessionId, filesChanged: filesChanged.length });
-        await api.updateSession(s.sessionId, {
-          filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
-          branch: currentBranch || undefined,
-          gitCapture,
-        });
-        debugLog('post-commit', 'API update complete', { sessionId: s.sessionId });
-      } catch (err: any) {
-        debugLog('post-commit', 'API update error (non-fatal)', { sessionId: s.sessionId, message: err.message });
+    if (connected) {
+      for (const s of activeSessions) {
+        try {
+          debugLog('post-commit', 'sending incremental update', { sessionId: s.sessionId, filesChanged: filesChanged.length });
+          await api.updateSession(s.sessionId, {
+            filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
+            branch: currentBranch || undefined,
+            gitCapture,
+          });
+          debugLog('post-commit', 'API update complete', { sessionId: s.sessionId });
+        } catch (err: any) {
+          debugLog('post-commit', 'API update error (non-fatal)', { sessionId: s.sessionId, message: err.message });
+        }
       }
     }
   } else {
@@ -1223,9 +1292,8 @@ async function handlePostToolUse(input: Record<string, any>, agentSlug?: string)
       debugLog('post-tool-use', 'branch changed', { from: state.branch, to: currentBranch });
       state.branch = currentBranch;
       saveSessionState(state, saveCwd, state.sessionTag);
-      // Update server
-      const config = loadConfig();
-      if (config && state.sessionId) {
+      // Update server (connected mode only)
+      if (isConnectedMode() && state.sessionId) {
         api.updateSession(state.sessionId, { branch: currentBranch }).catch(() => {});
       }
     }
