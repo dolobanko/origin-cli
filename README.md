@@ -139,7 +139,7 @@ stop / session-end  → Finalize session, write git metadata
 
 `origin init` detects installed tools and configures hooks automatically.
 
-## Feature Comparison
+## Feature Comparison: Standalone vs Connected
 
 | Feature | Standalone | Connected |
 |---------|:----------:|:---------:|
@@ -154,6 +154,47 @@ stop / session-end  → Finalize session, write git metadata
 | Session reviews | — | ✅ |
 | Audit log | — | ✅ |
 | PR gating | — | ✅ |
+
+## Origin vs Entire vs git-ai
+
+|  | **Origin CLI** | **[Entire](https://entire.io)** | **[git-ai](https://usegitai.com)** |
+|--|:-:|:-:|:-:|
+| **Core approach** | Session lifecycle hooks | Git hooks + shadow branches | `git-ai checkpoint` + Git notes |
+| **What it captures** | Full session: prompts, responses, tool calls, costs | Session transcripts + checkpoints | Code attribution only (line → agent) |
+| **AI blame** | ✅ `origin blame` | ❌ | ✅ `git-ai blame` |
+| **Session capture** | ✅ Full lifecycle (6 hook events) | ✅ Transcript capture on push | ❌ No session tracking |
+| **Session history** | ✅ `origin sessions` | ✅ Web dashboard | ❌ |
+| **Time travel / rewind** | ✅ `origin resume <id>` | ✅ `entire rewind` | ❌ |
+| **Code search** | ✅ `origin search` | ❌ | ❌ |
+| **Session explain** | ❌ | ✅ `entire explain` (AI summary) | ✅ `/ask` (query author) |
+| **Local stats** | ✅ Tokens, costs, models | ❌ | ✅ `git-ai stats` |
+| **Policy enforcement** | ✅ Real-time blocking (pre-tool-use) | ❌ | ❌ |
+| **Session reviews** | ✅ Approve/reject/flag | ❌ | ❌ |
+| **Team dashboards** | ✅ (Connected mode) | ✅ Web dashboard | ✅ (Enterprise) |
+| **Audit log** | ✅ SOC 2 ready | ❌ | ❌ |
+| **PR gating** | ✅ Block unreviewed PRs | ❌ | ❌ |
+| **CI/CD integration** | ✅ | ❌ | ❌ |
+| **IDE integration** | ❌ | ❌ | ✅ VS Code gutter annotations |
+| **Works offline** | ✅ | ✅ | ✅ |
+| **Storage** | Git notes + branches + SQLite | Shadow branch (`entire/checkpoints/v1`) | Git notes (`refs/notes/ai`) |
+| **Zero config** | ✅ `origin init` | ✅ `entire enable` | ✅ Auto (no per-repo setup) |
+| **Agents supported** | 6 (Claude Code, Cursor, Gemini, Windsurf, Aider, Copilot) | 5 (Claude Code, Gemini, OpenCode, Cursor, Copilot) | 12+ (Claude Code, Cursor, Copilot, Gemini, Windsurf, Amp, Codex, etc.) |
+| **Language** | TypeScript (Node.js) | Go | Go |
+| **License** | MIT | Proprietary | Apache 2.0 |
+
+### Why Origin
+
+**Session governance, not just tracking.** Origin captures the complete session lifecycle and lets you enforce policies *during* the session — blocking restricted file access, enforcing cost limits, requiring reviews before merge. Entire and git-ai track what happened; Origin controls what's allowed to happen.
+
+**Standalone-first.** Works fully offline with zero setup. Add the platform later for team features — nothing breaks, nothing migrates.
+
+### When to use Entire
+
+Entire is a good fit if you want a **visual dashboard** for browsing AI coding sessions and checkpoints, with AI-powered session summaries. It captures transcripts and supports rewind to previous checkpoints. No policy enforcement or attribution features.
+
+### When to use git-ai
+
+git-ai is the best choice if you only need **line-level attribution** — knowing which AI agent wrote each line. Broadest agent support (12+), VS Code integration with gutter annotations, and the `/ask` command to query the original AI about its code.
 
 ## Configuration
 
