@@ -161,29 +161,53 @@ stop / session-end  → Finalize session, write git metadata
 |--|:-:|:-:|:-:|
 | **Core approach** | Session lifecycle hooks | Git hooks + shadow branches | `git-ai checkpoint` + Git notes |
 | **What it captures** | Full session: prompts, responses, tool calls, costs | Session transcripts + checkpoints | Code attribution only (line → agent) |
-| **AI blame** | ✅ `origin blame` | ❌ | ✅ `git-ai blame` |
-| **Session capture** | ✅ Full lifecycle (6 hook events) | ✅ Transcript capture on push | ❌ No session tracking |
-| **Session history** | ✅ `origin sessions` | ✅ Web dashboard | ❌ |
-| **Time travel / rewind** | ✅ `origin resume <id>` | ✅ `entire rewind` | ❌ |
-| **Code search** | ✅ `origin search` | ❌ | ❌ |
-| **Session explain** | ✅ `origin explain --summarize` | ✅ `entire explain` (AI summary) | ❌ |
-| **Ask about code** | ✅ `origin ask` (file/session/query) | ❌ | ✅ `/ask` (query author) |
-| **Local stats** | ✅ Tokens, costs, models | ❌ | ✅ `git-ai stats` |
-| **Policy enforcement** | ✅ Real-time blocking (pre-tool-use) | ❌ | ❌ |
-| **Session reviews** | ✅ Approve/reject/flag | ❌ | ❌ |
-| **Team dashboards** | ✅ (Connected mode) | ✅ Web dashboard | ✅ (Enterprise) |
-| **Audit log** | ✅ SOC 2 ready | ❌ | ❌ |
-| **PR gating** | ✅ Block unreviewed PRs | ❌ | ❌ |
-| **CI/CD integration** | ✅ | ❌ | ❌ |
-| **IDE integration** | ❌ | ❌ | ✅ VS Code gutter annotations |
-| **Works offline** | ✅ | ✅ | ✅ |
-| **Storage** | Git notes + branches + SQLite | Shadow branch (`entire/checkpoints/v1`) | Git notes (`refs/notes/ai`) |
-| **Zero config** | ✅ `origin init` | ✅ `entire enable` | ✅ Auto (no per-repo setup) |
-| **Agents supported** | 6 (Claude Code, Cursor, Gemini, Windsurf, Aider, Copilot) | 5 (Claude Code, Gemini, OpenCode, Cursor, Copilot) | 12+ (Claude Code, Cursor, Copilot, Gemini, Windsurf, Amp, Codex, etc.) |
-| **Language** | TypeScript (Node.js) | Go | Go |
-| **License** | MIT | Proprietary | Apache 2.0 |
+| | | | |
+| **Session & Tracking** | | | |
+| Session capture | ✅ Full lifecycle (6 hook events) | ✅ Transcript capture on push | ❌ |
+| Session history | ✅ `origin sessions` | ✅ Web dashboard | ❌ |
+| Session explain | ✅ `origin explain --summarize` | ✅ `entire explain` (AI summary) | ❌ |
+| Ask about code | ✅ `origin ask` (file/session/query) | ❌ | ✅ `/ask` (query author) |
+| Session sharing | ✅ `origin share` (bundle/clipboard) | ❌ | ❌ |
+| Session resume | ✅ `origin resume` (restore context) | ❌ | ❌ |
+| | | | |
+| **Attribution & Blame** | | | |
+| AI blame | ✅ `origin blame` (line-level) | ❌ | ✅ `git-ai blame` |
+| Attributed diffs | ✅ `origin diff` (AI/human annotations) | ❌ | ❌ |
+| Time travel / rewind | ✅ `origin rewind` (interactive browser) | ✅ `entire rewind` | ❌ |
+| | | | |
+| **Search & Analysis** | | | |
+| Code search | ✅ `origin search` (across all prompts) | ❌ | ❌ |
+| Analytics | ✅ `origin stats` (tokens, costs, models) | ❌ | ✅ `git-ai stats` |
+| Pattern analysis | ✅ `origin analyze` (prompting patterns, trends) | ❌ | ❌ |
+| | | | |
+| **Governance** | | | |
+| Policy enforcement | ✅ Real-time blocking (pre-tool-use) | ❌ | ❌ |
+| Session reviews | ✅ Approve/reject/flag | ❌ | ❌ |
+| Audit log | ✅ SOC 2 ready | ❌ | ❌ |
+| PR gating | ✅ Block unreviewed PRs | ❌ | ❌ |
+| Team dashboards | ✅ Connected mode | ✅ Web dashboard | ✅ Enterprise |
+| | | | |
+| **DevOps & Workflow** | | | |
+| CI/CD integration | ✅ `origin ci` (check, squash-merge, GitHub Actions) | ❌ | ❌ |
+| Trail system | ✅ `origin trail` (branch-scoped work tracking) | ❌ | ❌ |
+| Plugin system | ✅ `origin plugin` (install custom commands) | ❌ | ❌ |
+| Git proxy | ✅ `origin proxy` (transparent attribution) | ❌ | ❌ |
+| Local database | ✅ `origin db` (import, stats, manage) | ❌ | ❌ |
+| Diagnostics | ✅ `origin doctor` + `origin clean` | ❌ | ❌ |
+| | | | |
+| **Platform** | | | |
+| IDE integration | ❌ | ❌ | ✅ VS Code gutter annotations |
+| Works offline | ✅ | ✅ | ✅ |
+| Zero config | ✅ `origin init` | ✅ `entire enable` | ✅ Auto |
+| Agents supported | 6 (Claude Code, Cursor, Gemini, Windsurf, Aider, Copilot) | 5 (Claude Code, Gemini, OpenCode, Cursor, Copilot) | 12+ |
+| Language | TypeScript (Node.js) | Go | Go |
+| License | MIT | Proprietary | Apache 2.0 |
+| | | | |
+| **Feature count** | **35+ commands** | **~5 commands** | **~6 commands** |
 
 ### Why Origin
+
+**35+ commands vs 5-6.** Origin isn't just a tracker — it's a full governance platform. Session lifecycle, attribution, search, analysis, trails, CI/CD, plugins, diagnostics. Entire and git-ai solve one problem each; Origin solves the whole workflow.
 
 **Session governance, not just tracking.** Origin captures the complete session lifecycle and lets you enforce policies *during* the session — blocking restricted file access, enforcing cost limits, requiring reviews before merge. Entire and git-ai track what happened; Origin controls what's allowed to happen.
 
@@ -191,11 +215,11 @@ stop / session-end  → Finalize session, write git metadata
 
 ### When to use Entire
 
-Entire is a good fit if you want a **visual dashboard** for browsing AI coding sessions and checkpoints, with AI-powered session summaries. It captures transcripts and supports rewind to previous checkpoints. No policy enforcement or attribution features.
+Entire is a good fit if you want a **visual dashboard** for browsing AI coding sessions and checkpoints, with AI-powered session summaries. It captures transcripts and supports rewind to previous checkpoints. No policy enforcement, attribution, or analysis features.
 
 ### When to use git-ai
 
-git-ai is the best choice if you only need **line-level attribution** — knowing which AI agent wrote each line. Broadest agent support (12+), VS Code integration with gutter annotations, and the `/ask` command to query the original AI about its code.
+git-ai is the best choice if you only need **line-level attribution** — knowing which AI agent wrote each line. Broadest agent support (12+), VS Code integration with gutter annotations, and the `/ask` command to query the original AI about its code. No session tracking, governance, or analysis.
 
 ## Configuration
 
