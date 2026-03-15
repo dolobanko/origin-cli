@@ -1,6 +1,6 @@
 # Origin CLI
 
-Open-source tool for tracking, attributing, and governing AI-assisted code. Works **standalone** (no server) or **connected** to the [Origin platform](https://origin-platform.fly.dev).
+Open-source tool for tracking, attributing, and governing AI-assisted code. Works **standalone** (no server) or **connected** to the [Origin platform](https://getorigin.io).
 
 Hooks into AI coding agents — Claude Code, Cursor, Gemini CLI, Windsurf, Aider, GitHub Copilot — to capture sessions, provide attribution, and optionally enforce policies.
 
@@ -29,7 +29,7 @@ Everything above **plus** team governance:
 ## Install
 
 ```bash
-npm i -g https://origin-platform.fly.dev/cli/origin-cli-latest.tgz
+npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ```
 
 Requires Node.js 18+. Verify: `origin --version`
@@ -227,7 +227,7 @@ Config file: `~/.origin/config.json`
 
 ```json
 {
-  "serverUrl": "https://origin-platform.fly.dev",
+  "serverUrl": "https://getorigin.io",
   "apiKey": "org_...",
   "machineId": "machine_..."
 }
@@ -252,7 +252,7 @@ Nothing leaves your machine unless you `origin login` and connect to the platfor
 
 ## Documentation
 
-Full documentation with examples: [origin-platform.fly.dev/cli](https://origin-platform.fly.dev/cli)
+Full documentation with examples: [getorigin.io/cli](https://getorigin.io/cli)
 
 ## License
 
