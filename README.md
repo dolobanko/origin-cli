@@ -166,7 +166,8 @@ stop / session-end  → Finalize session, write git metadata
 | **Session history** | ✅ `origin sessions` | ✅ Web dashboard | ❌ |
 | **Time travel / rewind** | ✅ `origin resume <id>` | ✅ `entire rewind` | ❌ |
 | **Code search** | ✅ `origin search` | ❌ | ❌ |
-| **Session explain** | ❌ | ✅ `entire explain` (AI summary) | ✅ `/ask` (query author) |
+| **Session explain** | ✅ `origin explain --summarize` | ✅ `entire explain` (AI summary) | ❌ |
+| **Ask about code** | ✅ `origin ask` (file/session/query) | ❌ | ✅ `/ask` (query author) |
 | **Local stats** | ✅ Tokens, costs, models | ❌ | ✅ `git-ai stats` |
 | **Policy enforcement** | ✅ Real-time blocking (pre-tool-use) | ❌ | ❌ |
 | **Session reviews** | ✅ Approve/reject/flag | ❌ | ❌ |
