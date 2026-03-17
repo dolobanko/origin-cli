@@ -157,6 +157,40 @@ function escapeShellArg(arg: string): string {
   return "'" + arg.replace(/'/g, "'\\''") + "'";
 }
 
+// ─── Agent-Model Mapping ──────────────────────────────────────────────────
+
+/**
+ * Maps agent slugs to regex patterns that match their model strings.
+ * Used for reliable agent-to-session matching instead of fragile substring checks.
+ */
+const AGENT_MODEL_PATTERNS: Record<string, RegExp> = {
+  'claude': /claude|anthropic|sonnet|opus|haiku/i,
+  'gemini': /gemini|google/i,
+  'cursor': /cursor|gpt|openai/i,
+  'codex': /codex/i,
+  'aider': /aider/i,
+  'windsurf': /windsurf|codeium/i,
+  'copilot': /copilot/i,
+  'continue': /continue/i,
+  'amp': /amp/i,
+  'junie': /junie|jetbrains/i,
+  'opencode': /opencode/i,
+  'rovo': /rovo/i,
+  'droid': /droid/i,
+};
+
+/**
+ * Check if a session's model field matches the given agent slug.
+ */
+function sessionMatchesAgent(session: SessionState, agentSlug: string): boolean {
+  const model = (session.model || '').toLowerCase();
+  const slug = agentSlug.toLowerCase();
+  const pattern = AGENT_MODEL_PATTERNS[slug];
+  if (pattern) return pattern.test(model);
+  // Fallback for unknown agents: exact substring match
+  return model.includes(slug) || slug.includes(model);
+}
+
 // ─── Concurrent Session State Lookup ──────────────────────────────────────
 
 /**
@@ -165,8 +199,10 @@ function escapeShellArg(arg: string): string {
  * With concurrent session support, each Claude Code window has its own
  * state file (tagged by sessionTag). This helper finds the right one by:
  * 1. Exact match on claudeSessionId (current or stored in state)
- * 2. Most recently started session (fallback for agent subprocesses
- *    that have a different session_id from the parent)
+ * 2. Agent-filtered match using model patterns (when agentSlug is provided)
+ * 3. Single active session (unambiguous — safe to use)
+ * 4. Returns null when multiple sessions exist and no reliable match is found,
+ *    to avoid misattributing commits to the wrong session.
  *
  * Returns the state and the resolved cwd to use for saving.
  */
@@ -183,10 +219,7 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
     }
   }
 
-  // 2. Fall back to most recently started session for this repo
-  //    (handles agent subprocesses with unknown session IDs)
-  //    When agentSlug is provided, prefer sessions matching that agent's model
-  //    to avoid closing Claude's session when Gemini ends (and vice versa).
+  // 2. Fall back to active sessions for this repo
   let sessions = listActiveSessions(hookCwd);
   if (sessions.length === 0 && repoPath !== hookCwd) {
     sessions = listActiveSessions(repoPath);
@@ -195,30 +228,37 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
   if (sessions.length > 0) {
     sessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
 
-    // If we know the agent type, prefer sessions matching that model
-    let best = sessions[0];
-    if (agentSlug && sessions.length > 1) {
-      const slugLower = agentSlug.toLowerCase();
-      const modelMatch = sessions.find(s => {
-        const m = (s.model || '').toLowerCase();
-        return m.includes(slugLower) || slugLower.includes(m);
-      });
-      if (modelMatch) {
-        best = modelMatch;
-        debugLog('findStateForHook', 'agent-filtered match', { agentSlug, model: best.model, sessionId: best.sessionId });
+    // Single session — no ambiguity, safe to use
+    if (sessions.length === 1) {
+      const best = sessions[0];
+      debugLog('findStateForHook', 'single active session', { sessionId: best.sessionId, model: best.model, tag: best.sessionTag });
+      return { state: best, saveCwd: best.repoPath || repoPath };
+    }
+
+    // Multiple sessions — require agent match to avoid misattribution
+    if (agentSlug) {
+      const matching = sessions.filter(s => sessionMatchesAgent(s, agentSlug));
+      if (matching.length > 0) {
+        const best = matching[0]; // already sorted by startedAt desc
+        debugLog('findStateForHook', 'agent-filtered match', {
+          agentSlug,
+          model: best.model,
+          sessionId: best.sessionId,
+          tag: best.sessionTag,
+          candidateCount: matching.length,
+        });
+        return { state: best, saveCwd: best.repoPath || repoPath };
       }
     }
 
-    debugLog('findStateForHook', 'fallback to most recent', {
+    // Multiple sessions, no reliable match — return null to avoid misattribution
+    debugLog('findStateForHook', 'ambiguous: multiple sessions, no reliable match', {
       claudeSessionId,
       agentSlug,
-      matchedSessionId: best.sessionId,
-      matchedClaudeId: best.claudeSessionId,
-      matchedModel: best.model,
-      tag: best.sessionTag,
       totalSessions: sessions.length,
+      sessionModels: sessions.map(s => ({ id: s.sessionId, model: s.model })),
     });
-    return { state: best, saveCwd: best.repoPath || repoPath };
+    return null;
   }
 
   // 3. Legacy: try untagged state file (backward compat before concurrent support)
@@ -1008,10 +1048,53 @@ export async function handlePostCommit(): Promise<void> {
 
   // Get ALL active sessions for this repo (concurrent session support)
   const activeSessions = listActiveSessions(hookCwd);
-  // Pick the most recent session for trailer/notes (or null)
-  let state = activeSessions.length > 0
-    ? activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0]
-    : null;
+  activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+
+  // Pick the correct session — use process detection to disambiguate when multiple are active
+  let state: SessionState | null = null;
+  if (activeSessions.length === 1) {
+    state = activeSessions[0];
+  } else if (activeSessions.length > 1) {
+    // Detect which agent made this commit via process detection
+    let detectedSlug: string | null = null;
+    const agentChecks = [
+      { cmd: 'pgrep -f "claude.*stream-json"', slug: 'claude' },
+      { cmd: 'pgrep -f "gemini.*cli|/gemini "', slug: 'gemini' },
+      { cmd: 'pgrep -f "codex"', slug: 'codex' },
+      { cmd: 'pgrep -f "aider"', slug: 'aider' },
+      { cmd: 'pgrep -f "windsurf"', slug: 'windsurf' },
+      { cmd: 'pgrep -f "copilot.*cli|github-copilot"', slug: 'copilot' },
+      { cmd: 'pgrep -f "continue.*dev"', slug: 'continue' },
+      { cmd: 'pgrep -f "amp.*cli|/amp "', slug: 'amp' },
+      { cmd: 'pgrep -f "junie|jetbrains.*ai"', slug: 'junie' },
+      { cmd: 'pgrep -f "opencode"', slug: 'opencode' },
+      { cmd: 'pgrep -f "rovo.*dev"', slug: 'rovo' },
+      { cmd: 'pgrep -f "droid"', slug: 'droid' },
+    ];
+    for (const check of agentChecks) {
+      try {
+        execSync(check.cmd, { stdio: ['pipe', 'pipe', 'pipe'] });
+        detectedSlug = check.slug;
+        break;
+      } catch { /* no match */ }
+    }
+
+    if (detectedSlug) {
+      const match = activeSessions.find(s => sessionMatchesAgent(s, detectedSlug!));
+      if (match) {
+        state = match;
+        debugLog('post-commit', 'matched session via process detection', { detectedSlug, sessionId: match.sessionId, model: match.model });
+      }
+    }
+
+    // If process detection didn't narrow it down, don't guess
+    if (!state) {
+      debugLog('post-commit', 'multiple sessions active, could not disambiguate', {
+        totalSessions: activeSessions.length,
+        sessionModels: activeSessions.map(s => ({ id: s.sessionId, model: s.model })),
+      });
+    }
+  }
 
   // If no active session, detect if an AI agent CLI process is running
   // This handles cases where agent hooks didn't fire (e.g., Gemini CLI)
