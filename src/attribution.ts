@@ -601,7 +601,7 @@ export function computeAttributionStats(
         // Count lines from this commit
         try {
           const stat = execSync(
-            `git diff-tree --root --numstat ${sha}`,
+            `git show --numstat --format= ${sha} --`,
             execOpts(repoPath),
           ).trim();
           let commitLines = 0;
@@ -631,7 +631,7 @@ export function computeAttributionStats(
         humanCommits++;
         try {
           const stat = execSync(
-            `git diff-tree --root --numstat ${sha}`,
+            `git show --numstat --format= ${sha} --`,
             execOpts(repoPath),
           ).trim();
           let commitLines = 0;
