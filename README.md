@@ -172,7 +172,7 @@ origin login    # Authenticate with your Origin instance
 origin init     # Register machine + install hooks
 ```
 
-Connected mode adds: dashboard, policy enforcement, PR blocking, compliance reports, team leaderboards, Slack notifications, and GitHub App integration.
+Connected mode adds: dashboard, policy enforcement, PR blocking, commit annotations (`[AI 73%]` on GitHub PRs), compliance reports, team leaderboards, Slack notifications, and GitHub App integration.
 
 ---
 
