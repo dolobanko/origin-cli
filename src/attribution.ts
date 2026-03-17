@@ -1,4 +1,5 @@
 import { execSync } from 'child_process';
+import { listActiveSessions } from './session-state.js';
 
 // ─── Tool Detection ──────────────────────────────────────────────────────
 
@@ -110,10 +111,33 @@ export function isAiCommit(repoPath: string, commitSha: string): boolean {
       `git log -1 --format=%B ${commitSha}`,
       execOpts(repoPath),
     ).trim();
-    return message.includes('Origin-Session:');
+    if (message.includes('Origin-Session:')) return true;
   } catch {
-    return false;
+    // ignore
   }
+
+  // Check if commit falls within an active session's range
+  // (notes haven't been written yet because session is still running)
+  try {
+    const activeSessions = listActiveSessions(repoPath);
+    for (const session of activeSessions) {
+      if (session.headShaAtStart) {
+        try {
+          execSync(
+            `git merge-base --is-ancestor ${session.headShaAtStart} ${commitSha}`,
+            execOpts(repoPath),
+          );
+          return true;
+        } catch {
+          // Not an ancestor — commit is before session start
+        }
+      }
+    }
+  } catch {
+    // Non-fatal
+  }
+
+  return false;
 }
 
 /**
@@ -567,7 +591,7 @@ export function computeAttributionStats(
       if (isAi) {
         aiCommits++;
         const model = note?.model || 'unknown';
-        const tool = detectToolFromModel(model);
+        const tool = detectToolFromModel(model, note?.agent || undefined);
 
         // Count lines from this commit
         try {
