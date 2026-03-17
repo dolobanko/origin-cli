@@ -29,7 +29,8 @@ Origin is an AI coding governance platform that tracks, attributes, and governs 
 ## Installation
 
 ```bash
-npm install -g @origin/cli
+# Install from Origin platform
+npm i -g https://origin-platform.fly.dev/cli/origin-cli-latest.tgz
 ```
 
 Verify:
@@ -38,7 +39,25 @@ Verify:
 origin --version
 ```
 
-## Quick Start
+## Quick Start (Standalone — no server required)
+
+```bash
+# 1. Enable global hooks (tracks all repos automatically)
+origin enable --global
+
+# 2. Code with any AI agent (Claude Code, Gemini CLI, Cursor, etc.)
+
+# 3. View attribution
+origin blame src/index.ts    # Line-level AI/human tags
+origin stats                 # AI vs human breakdown
+origin diff                  # Annotated diff
+origin sessions              # List all AI sessions
+origin session <id>          # Full session transcript
+```
+
+No login, no API keys. All data stored locally in git notes and `origin-sessions` branch.
+
+## Quick Start (Connected — with Origin server)
 
 ```bash
 # 1. Login to your Origin instance
@@ -243,11 +262,13 @@ Show AI vs human attribution per line, like `git blame` but for AI authorship.
 ```bash
 origin blame src/index.ts
 # Output:
-#   Line  Tag   Model             Content
-#   ───────────────────────────────────────
-#     1  [HU]                    #!/usr/bin/env node
-#     2  [AI]  claude-sonnet-4   import express from 'express';
-#     3  [MX]  claude-sonnet-4   const port = 8080;
+#   Line  Tag   Author/Model              Content
+#   ─────────────────────────────────────────────────
+#     1  [AI]  gemini-3-flash-preview     hello world
+#     2  [AI]  claude-sonnet-4            import express from 'express';
+#     3  [HU]  Artem Dolobanko            const port = 8080;
+#
+# Summary: AI: 2 (67%)  Human: 1 (33%)  Mixed: 0 (0%)
 
 # Show specific line range
 origin blame src/index.ts --line 10-20
@@ -257,8 +278,8 @@ origin blame src/index.ts --json
 ```
 
 Tags:
-- `[AI]` (green) — Line written by AI agent
-- `[HU]` (white) — Line written by human
+- `[AI]` (green) — Line written by AI agent (shows model name)
+- `[HU]` (white) — Line written by human (shows git author)
 - `[MX]` (yellow) — AI wrote initial version, human modified
 
 ### `origin diff [range]`
@@ -311,6 +332,106 @@ origin search "API" --repo /path/to/repo    # Filter by repo
 ```
 
 Searches the local prompt database. Run `origin db import` first to populate from the `origin-sessions` branch.
+
+### `origin ask <query>`
+
+Query the context behind AI-generated code. Find which session and prompts generated a specific file or line.
+
+```bash
+# Ask about a specific file
+origin ask "auth" --file src/auth.ts
+# Shows: sessions that modified this file, matching prompts
+
+# Ask about a specific line
+origin ask "why" --file src/index.ts --line 42
+
+# Search within a specific session
+origin ask "refactor" --session local-f7a2b3
+
+# Global prompt search
+origin ask "authentication"
+```
+
+How it works:
+1. If `--file` is given, looks up sessions via git notes on commits touching that file
+2. If `--session` is given, searches that session's prompts
+3. Otherwise, searches all prompts matching the query
+4. Falls back to searching the `origin-sessions` branch directly
+
+### `origin prompts <file>`
+
+Show all AI prompts that led to changes in a specific file — like `git log` but for AI prompts. Shows which prompts, models, and sessions touched each file.
+
+```bash
+# See which AI prompts touched a file
+origin prompts src/auth.ts
+
+# See prompts + the actual code diff per prompt
+origin prompts src/auth.ts --expand
+
+# Limit results
+origin prompts src/auth.ts --limit 5
+```
+
+Output:
+
+```
+  src/auth.ts — 3 AI sessions touched this file
+
+  Mar 16, 19:42  Claude 3.5 Sonnet      (a1b2c3d4)
+  > "add JWT validation middleware"
+    feat: add JWT auth middleware
+
+  Mar 16, 18:15  Gemini 2.5 Pro         (d4e5f6a7)
+  > "refactor auth to use async/await"
+    refactor: async auth handlers
+
+  Mar 15, 14:30  Claude 3.5 Sonnet      (g7h8i9j0)
+  > "implement login endpoint"
+    feat: login endpoint
+```
+
+With `--expand`, each entry includes the full colored diff showing exactly what lines that prompt added/removed in the file.
+
+### `origin chat`
+
+Interactive AI assistant for your repo's AI context. Ask natural language questions about your AI-authored code, sessions, costs, and attribution.
+
+Requires `ANTHROPIC_API_KEY` environment variable.
+
+```bash
+# Interactive mode — ongoing conversation
+origin chat
+
+# Single question mode
+origin chat -q "how much AI code is in this repo?"
+origin chat -q "which model wrote the auth module?"
+origin chat -q "what did AI touch last week?"
+origin chat -q "show me the most expensive sessions"
+```
+
+Interactive session example:
+
+```
+  Origin Chat — ask anything about your AI-authored code
+
+  you > who wrote src/auth.ts?
+  3 AI sessions touched src/auth.ts. Claude 3.5 Sonnet wrote the initial
+  login endpoint (session local-g7h8i9, Mar 15), then Gemini 2.5 Pro
+  refactored it to async/await (session local-d4e5f6, Mar 16).
+
+  you > how much have I spent on AI this month?
+  Based on tracked sessions: $4.32 across 23 sessions.
+  Claude 3.5 Sonnet: $3.18 (74%), Gemini 2.5 Pro: $1.14 (26%).
+
+  you > exit
+```
+
+The assistant automatically gathers context from:
+- Git notes (AI commit metadata)
+- Session history (origin-sessions branch)
+- Local prompt database
+- Commit log and authors
 
 ### `origin analyze`
 
@@ -745,6 +866,8 @@ Origin uses a multi-layer hook system:
 | `post-tool-use` | AI finished using a tool | Tool result, subagent tracking |
 | `git-post-commit` | After every git commit | Commit SHA, message, files, diff |
 | `git-pre-push` | Before git push | Pushes origin-sessions branch alongside |
+| `git-post-rewrite` | After rebase/amend | Copies attribution notes to new SHAs |
+| `git-post-checkout` | After branch checkout/stash | Preserves attribution through stash ops |
 
 ### Data Flow
 
@@ -817,16 +940,17 @@ Each AI-assisted commit gets a note under `refs/notes/origin`:
 
 ```json
 {
-  "sessionId": "abc-123",
-  "model": "claude-sonnet-4",
-  "promptCount": 5,
-  "promptSummary": "Add authentication middleware...",
-  "tokensUsed": 15000,
-  "costUsd": 0.45,
-  "durationMs": 120000,
-  "linesAdded": 89,
-  "linesRemoved": 12,
-  "originUrl": "https://origin-platform.fly.dev/sessions/abc-123"
+  "origin": {
+    "sessionId": "local-f7a2b3",
+    "model": "gemini-3-flash-preview",
+    "promptCount": 5,
+    "promptSummary": "Add authentication middleware...",
+    "tokensUsed": 15000,
+    "costUsd": 0.45,
+    "durationMs": 120000,
+    "linesAdded": 89,
+    "linesRemoved": 12
+  }
 }
 ```
 
@@ -837,13 +961,21 @@ Push notes: `git push origin refs/notes/origin`
 
 ## Supported Agents
 
-| Agent | Transcript Format | Hook System | Status |
-|-------|-------------------|-------------|--------|
-| Claude Code | JSONL | Claude Code hooks API | Stable |
-| Cursor | JSONL | Cursor hooks API | Stable |
-| Gemini CLI | JSON | Gemini lifecycle hooks | Stable |
-| Windsurf | JSONL | Windsurf hooks API | Preview |
-| Aider | Git-based | aider.conf.yml | Preview |
+| Agent | Detection | Hook System | Status |
+|-------|-----------|-------------|--------|
+| Claude Code | Session hooks + process detection | Claude Code hooks API | Stable |
+| Gemini CLI | Process detection (`pgrep`) | Global post-commit hook | Stable |
+| Cursor | Session hooks | Cursor hooks API | Stable |
+| Codex CLI | Session hooks + process detection | Codex hooks API | Stable |
+| Aider | Process detection | Global post-commit hook | Stable |
+| Windsurf | Session hooks + process detection | Windsurf hooks API | Preview |
+| GitHub Copilot | Process detection | Global post-commit hook | Preview |
+| Continue | Process detection | Global post-commit hook | Preview |
+| Amp | Process detection | Global post-commit hook | Preview |
+| Junie | Process detection | Global post-commit hook | Preview |
+| OpenCode | Process detection | Global post-commit hook | Preview |
+| Rovo Dev | Process detection | Global post-commit hook | Preview |
+| Droid | Process detection | Global post-commit hook | Preview |
 
 ### Cost Estimation
 

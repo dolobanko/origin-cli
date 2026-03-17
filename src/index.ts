@@ -18,6 +18,8 @@ import { linkCommand } from './commands/link.js';
 import { hooksCommand, handlePostCommit, handlePrePush } from './commands/hooks.js';
 import { explainCommand } from './commands/explain.js';
 import { askCommand } from './commands/ask.js';
+import { promptsCommand } from './commands/prompts.js';
+import { chatCommand } from './commands/chat.js';
 import { doctorCommand } from './commands/doctor.js';
 import { resetCommand } from './commands/reset.js';
 import { cleanCommand } from './commands/clean.js';
@@ -54,7 +56,10 @@ program
 // ─── Setup ────────────────────────────────────────────────────────────────
 
 program.command('login').description('Login to Origin').action(loginCommand);
-program.command('init').description('Register this machine as an agent host').action(initCommand);
+program.command('init')
+  .description('Register this machine as an agent host')
+  .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
+  .action(initCommand);
 program.command('enable')
   .description('Install Origin hooks for session tracking')
   .option('-a, --agent <agent>', 'Agent to enable (claude-code, cursor, gemini, windsurf, aider). Auto-detects if omitted.')
@@ -89,6 +94,17 @@ program.command('ask <query>')
   .option('-s, --session <id>', 'Search within a specific session')
   .option('--limit <n>', 'Max results', '5')
   .action(askCommand);
+
+program.command('prompts <file>')
+  .description('Show AI prompts that led to changes in a file — like git log but for AI prompts')
+  .option('-e, --expand', 'Show the actual code diff for each prompt')
+  .option('--limit <n>', 'Max entries to show', '10')
+  .action(promptsCommand);
+
+program.command('chat')
+  .description('Interactive AI assistant — ask questions about your AI-authored code in natural language')
+  .option('-q, --question <text>', 'Ask a single question (non-interactive)')
+  .action(chatCommand);
 
 program.command('doctor')
   .description('Scan for and fix stuck/orphaned sessions')
@@ -257,7 +273,6 @@ proxy.command('status')
 
 program.command('upgrade')
   .description('Upgrade Origin CLI to latest version')
-  .option('-c, --channel <channel>', 'Release channel (stable, beta, canary)', 'stable')
   .option('--check', 'Only check for updates, do not install')
   .action(upgradeCommand);
 
@@ -271,6 +286,33 @@ hooks.command('windsurf <event>').description('Handle Windsurf hook event').acti
 hooks.command('aider <event>').description('Handle Aider hook event').action((event) => hooksCommand(event, 'aider'));
 hooks.command('git-post-commit').description('Handle git post-commit hook').action(() => handlePostCommit());
 hooks.command('git-pre-push').description('Handle git pre-push hook').action(() => handlePrePush());
+hooks.command('git-post-rewrite').description('Handle git post-rewrite hook (rebase/amend)').action(async () => {
+  const { preserveAttributionBatch, parseRewriteInput, handleCherryPick } = await import('./history-preservation.js');
+  const { getGitRoot } = await import('./session-state.js');
+  const repoPath = getGitRoot(process.cwd());
+  if (!repoPath) return;
+  // Read old-sha new-sha pairs from stdin
+  let input = '';
+  try {
+    input = require('fs').readFileSync(0, 'utf-8');
+  } catch { /* no stdin */ }
+  if (input) {
+    const mappings = parseRewriteInput(input);
+    preserveAttributionBatch(repoPath, mappings);
+  }
+  // Also check for cherry-pick context
+  handleCherryPick(repoPath);
+});
+hooks.command('git-post-checkout').description('Handle git post-checkout hook').action(async () => {
+  const { handlePostCheckout } = await import('./history-preservation.js');
+  const { getGitRoot } = await import('./session-state.js');
+  const repoPath = getGitRoot(process.cwd());
+  if (!repoPath) return;
+  const args = process.argv.slice(process.argv.indexOf('git-post-checkout') + 1);
+  const prevHead = args[0] || '';
+  const newHead = args[1] || '';
+  handlePostCheckout(repoPath, prevHead, newHead);
+});
 
 // ─── Sessions ────────────────────────────────────────────────────────────
 

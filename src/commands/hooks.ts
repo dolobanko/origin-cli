@@ -1009,9 +1009,49 @@ export async function handlePostCommit(): Promise<void> {
   // Get ALL active sessions for this repo (concurrent session support)
   const activeSessions = listActiveSessions(hookCwd);
   // Pick the most recent session for trailer/notes (or null)
-  const state = activeSessions.length > 0
+  let state = activeSessions.length > 0
     ? activeSessions.sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime())[0]
     : null;
+
+  // If no active session, detect if an AI agent CLI process is running
+  // This handles cases where agent hooks didn't fire (e.g., Gemini CLI)
+  if (!state) {
+    let detectedModel: string | null = null;
+    try {
+      // Use pgrep for targeted process detection — look for CLI binaries, not desktop apps
+      const checks = [
+        { cmd: 'pgrep -f "gemini.*cli|/gemini "', model: 'gemini' },
+        { cmd: 'pgrep -f "claude.*stream-json"', model: 'claude' },
+        { cmd: 'pgrep -f "codex"', model: 'codex' },
+        { cmd: 'pgrep -f "aider"', model: 'aider' },
+        { cmd: 'pgrep -f "windsurf"', model: 'windsurf' },
+        { cmd: 'pgrep -f "copilot.*cli|github-copilot"', model: 'copilot' },
+        { cmd: 'pgrep -f "continue.*dev"', model: 'continue' },
+        { cmd: 'pgrep -f "amp.*cli|/amp "', model: 'amp' },
+        { cmd: 'pgrep -f "junie|jetbrains.*ai"', model: 'junie' },
+        { cmd: 'pgrep -f "opencode"', model: 'opencode' },
+        { cmd: 'pgrep -f "rovo.*dev"', model: 'rovo' },
+        { cmd: 'pgrep -f "droid"', model: 'droid' },
+      ];
+      for (const check of checks) {
+        try {
+          execSync(check.cmd, { stdio: ['pipe', 'pipe', 'pipe'] });
+          detectedModel = check.model;
+          break;
+        } catch { /* pgrep exits 1 if no match */ }
+      }
+    } catch { /* ignore */ }
+
+    if (detectedModel) {
+      debugLog('post-commit', 'no active session but detected AI process', { detectedModel });
+      // Create a synthetic state so notes get tagged as AI
+      state = {
+        sessionId: `detected-${detectedModel}-${Date.now().toString(36)}`,
+        model: detectedModel,
+        startedAt: new Date().toISOString(),
+      } as any;
+    }
+  }
 
   // Update branch on all active sessions if it changed
   for (const s of activeSessions) {
@@ -1044,11 +1084,33 @@ export async function handlePostCommit(): Promise<void> {
   }
 
   // Write git notes on this commit immediately
+  // If model is missing/unknown, try pgrep detection as fallback
+  let noteModel = state?.model || '';
+  if (!noteModel || noteModel === 'unknown') {
+    try {
+      const fallbackChecks = [
+        { cmd: 'pgrep -f "claude.*stream-json"', model: 'claude' },
+        { cmd: 'pgrep -f "gemini.*cli|/gemini "', model: 'gemini' },
+        { cmd: 'pgrep -f "codex"', model: 'codex' },
+        { cmd: 'pgrep -f "aider"', model: 'aider' },
+        { cmd: 'pgrep -f "windsurf"', model: 'windsurf' },
+        { cmd: 'pgrep -f "copilot.*cli|github-copilot"', model: 'copilot' },
+        { cmd: 'pgrep -f "amp.*cli|/amp "', model: 'amp' },
+      ];
+      for (const check of fallbackChecks) {
+        try {
+          execSync(check.cmd, { stdio: ['pipe', 'pipe', 'pipe'] });
+          noteModel = check.model;
+          break;
+        } catch { /* no match */ }
+      }
+    } catch { /* ignore */ }
+  }
 
   try {
     writeGitNotes(repoPath, [commitSha], {
       sessionId: state?.sessionId || 'unknown',
-      model: state?.model || 'unknown',
+      model: noteModel || 'unknown',
       promptCount: state?.prompts?.length || 0,
       promptSummary: state?.prompts?.[state.prompts.length - 1] || '',
       tokensUsed: 0,
@@ -1097,7 +1159,8 @@ export async function handlePostCommit(): Promise<void> {
 
   // Write full session entrypoint to origin-sessions branch on every commit
   // Parse transcript now (not just at session-end) so we capture tokens, cost, prompts, files
-  if (state) {
+  // Skip for detected (synthetic) sessions — they don't have transcripts
+  if (state && state.transcriptPath) {
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
 
     // Parse transcript for full metrics and write session files
