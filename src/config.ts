@@ -18,6 +18,7 @@ export interface OriginConfig {
   telemetry?: boolean;
   autoUpdate?: boolean;
   secretRedaction?: boolean;
+  secretScan?: boolean;        // Pre-commit secret scanning (default: true)
   hookChaining?: boolean;
 }
 
@@ -58,6 +59,7 @@ export interface RepoConfig {
   agent?: string;  // Origin agent slug to link sessions to
   ignorePatterns?: string[];
   trackTabCompletions?: boolean;
+  secretScan?: boolean;  // Pre-commit secret scanning (default: true)
 }
 
 export function loadRepoConfig(repoPath: string): RepoConfig | null {
