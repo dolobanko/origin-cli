@@ -48,12 +48,12 @@ function listLocalSessions(repoPath: string): LocalSession[] {
           startedAt: metadata.startedAt || '',
           endedAt: metadata.endedAt || undefined,
           status: metadata.status || 'ended',
-          costUsd: metadata.costUsd || 0,
-          tokensUsed: metadata.tokensUsed || 0,
+          costUsd: metadata.cost?.usd || 0,
+          tokensUsed: metadata.tokens?.total || 0,
           durationMs: metadata.durationMs || 0,
           filesChanged: metadata.filesChanged || [],
-          linesAdded: metadata.linesAdded || 0,
-          linesRemoved: metadata.linesRemoved || 0,
+          linesAdded: metadata.lines?.added || 0,
+          linesRemoved: metadata.lines?.removed || 0,
           git: metadata.git,
           prompts: metadata.prompts,
         });
@@ -91,13 +91,33 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
       console.log(chalk.bold(`\nSessions (${data.total} total)\n`));
 
       for (const s of sessions) {
-        const statusColor = s.review?.status === 'APPROVED' ? chalk.green : s.review?.status === 'REJECTED' ? chalk.red : s.review?.status === 'FLAGGED' ? chalk.yellow : chalk.gray;
-        const status = s.review?.status || 'UNREVIEWED';
-        const files = (() => { try { return JSON.parse(s.filesChanged).length; } catch { return 0; } })();
-        const age = timeAgo(s.createdAt);
+        // Show session status (RUNNING/COMPLETED) first, then review status
+        let status: string;
+        let statusColor: (s: string) => string;
+        if (s.status === 'RUNNING') {
+          status = 'RUNNING';
+          statusColor = chalk.green;
+        } else if (s.review?.status === 'APPROVED') {
+          status = 'APPROVED';
+          statusColor = chalk.green;
+        } else if (s.review?.status === 'REJECTED') {
+          status = 'REJECTED';
+          statusColor = chalk.red;
+        } else if (s.review?.status === 'FLAGGED') {
+          status = 'FLAGGED';
+          statusColor = chalk.yellow;
+        } else {
+          status = 'UNREVIEWED';
+          statusColor = chalk.gray;
+        }
+
+        const files = (() => { try { const f = JSON.parse(s.filesChanged); return Array.isArray(f) ? f.length : 0; } catch { return 0; } })();
+        const lines = (s.linesAdded || 0) + (s.linesRemoved || 0);
+        const fileDisplay = files > 0 ? `${String(files).padStart(3)} files` : lines > 0 ? `${chalk.green('+' + s.linesAdded)}${chalk.red('-' + s.linesRemoved)}` : `  0 files`;
+        const age = timeAgo(s.createdAt || s.startedAt);
 
         console.log(
-          `  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.cyan(s.model.padEnd(25))}  ${statusColor(status.padEnd(12))}  ${chalk.white(String(files).padStart(3))} files  ${chalk.dim('$' + s.costUsd.toFixed(2).padStart(6))}  ${chalk.dim(age)}`
+          `  ${chalk.dim(s.id.slice(0, 8))}  ${chalk.cyan(s.model.padEnd(25))}  ${statusColor(status.padEnd(12))}  ${fileDisplay.padEnd(12)}  ${chalk.dim('$' + s.costUsd.toFixed(2).padStart(6))}  ${chalk.dim(age)}`
         );
         if (s.commitMessage) {
           console.log(`           ${chalk.gray(s.commitMessage.slice(0, 60))}`);
