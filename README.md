@@ -51,6 +51,7 @@ Attribution:
   origin blame <file>             AI/human attribution per line ([AI]/[HU] tags)
   origin diff [range]             Annotated diff with AI/human attribution
   origin stats                    AI vs human commit/line breakdown with charts
+  origin compare <a> [b]          Compare AI attribution between branches or ranges
   origin search <query>           Search AI prompt history
   origin ask <query>              Query which AI session wrote specific code
   origin prompts <file>           Show AI prompts that touched a file (--expand for diffs)
@@ -61,15 +62,23 @@ Attribution:
 Sessions:
   origin sessions                 List sessions (--status, --model, --limit)
   origin session <id>             View session detail with full transcript
+  origin export                   Export session data as CSV or JSON (--format, --output)
   origin resume [branch]          Resume session context for AI handoff
   origin explain [id]             Explain session with prompts and changes
   origin share <id>               Create shareable session bundle
+
+Configuration:
+  origin ignore                   List all ignore patterns (default + custom)
+  origin ignore add <pattern>     Add ignore pattern to .origin.json
+  origin ignore remove <pattern>  Remove ignore pattern
+  origin ignore test <filepath>   Test if a file would be ignored
 
 Time Travel:
   origin rewind                   Rewind to previous AI checkpoint
   origin trail                    Branch-centric work tracking
 
 Maintenance:
+  origin verify [--json]          Health check — agent config, repo, sessions, attribution
   origin doctor [--fix]           Diagnose and fix issues
   origin clean [--force]          Remove orphaned data
 ```
@@ -90,6 +99,10 @@ Maintenance:
 - **Search** — search all AI prompt history locally
 - **Prompt Analytics** — detect prompting patterns and metrics
 - **Trail System** — branch-centric work tracking linking sessions to features
+- **Compare** — compare AI attribution between branches or commit ranges
+- **Export** — export session data as CSV or JSON for external analysis
+- **Ignore Patterns** — manage which files Origin skips during tracking
+- **Verify** — health check showing agent config, repo status, sessions, and attribution
 - **Attribution Preservation** — AI tags survive rebase, amend, cherry-pick, and stash
 - **Auto-Detection** — 13 agents detected automatically
 - **Git Notes** — per-commit AI metadata stored in `refs/notes/origin`
