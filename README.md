@@ -42,7 +42,7 @@ That's it. Everything stored locally in git notes and the `origin-sessions` bran
 ```
 Setup:
   origin init                     Initialize agent + install global hooks
-  origin enable [--global]        Install hooks (all repos or current repo)
+  origin enable [--global]        Install hooks + secret scanner (all repos or current repo)
   origin disable [--global]       Remove hooks
   origin status                   Show system status
   origin upgrade                  Upgrade CLI to latest version
@@ -68,6 +68,9 @@ Sessions:
   origin share <id>               Create shareable session bundle
 
 Configuration:
+  origin config set <key> <val>   Set CLI config (secretScan, secretRedaction, etc.)
+  origin config get <key>         Get CLI config value
+  origin config list              List all config values
   origin ignore                   List all ignore patterns (default + custom)
   origin ignore add <pattern>     Add ignore pattern to .origin.json
   origin ignore remove <pattern>  Remove ignore pattern
@@ -103,6 +106,7 @@ Maintenance:
 - **Export** — export session data as CSV or JSON for external analysis
 - **Ignore Patterns** — manage which files Origin skips during tracking
 - **Verify** — health check showing agent config, repo status, sessions, and attribution
+- **Secret Scanner** — pre-commit hook blocks commits containing hardcoded secrets, API keys, and credentials
 - **Attribution Preservation** — AI tags survive rebase, amend, cherry-pick, and stash
 - **Auto-Detection** — 13 agents detected automatically
 - **Git Notes** — per-commit AI metadata stored in `refs/notes/origin`
@@ -130,12 +134,41 @@ Single question mode: `origin chat -q "what did AI touch last week?"`
 
 ---
 
+## Secret Scanner
+
+Origin includes a pre-commit hook that scans staged changes for hardcoded secrets and blocks the commit if any are found.
+
+```
+  ✗ Origin: secrets detected in staged changes
+
+    AWS Access Key
+    config.env:3  AKIA****MPLE
+
+    GitHub Token
+    src/api.ts:12  ghp_****ab12
+
+  2 secrets found. Commit blocked.
+
+  To bypass: git commit --no-verify
+  To disable: origin config set secretScan false
+```
+
+**Detected patterns:** AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, Slack tokens, JWTs, database connection strings, private keys, passwords, and generic `*_TOKEN=`, `*_SECRET=`, `*_KEY=`, `*_PASSWORD=` assignments.
+
+Installed automatically with `origin enable --global`. In connected mode, findings are reported to the platform Security tab in real-time.
+
+---
+
 ## How It Works
 
 ```
-AI Agent commits code
+AI Agent stages code
         ↓
-Global post-commit hook fires
+Pre-commit hook scans for secrets → blocks if found
+        ↓
+Commit goes through
+        ↓
+Post-commit hook fires
         ↓
 Origin detects AI process (pgrep) or active session
         ↓
