@@ -1533,18 +1533,7 @@ export async function handlePreCommit(): Promise<void> {
     return;
   }
 
-  // Check if secret scanning is disabled globally
-  if (config?.secretScan === false) {
-    debugLog('pre-commit', 'SKIP: secretScan disabled in config');
-    return;
-  }
-
-  // Check if disabled per-repo
   const repoConfig = loadRepoConfig(repoPath);
-  if (repoConfig?.secretScan === false) {
-    debugLog('pre-commit', 'SKIP: secretScan disabled in .origin.json');
-    return;
-  }
 
   const execOpts = {
     encoding: 'utf-8' as const,
@@ -1553,10 +1542,10 @@ export async function handlePreCommit(): Promise<void> {
     maxBuffer: 10 * 1024 * 1024, // 10MB for large diffs
   };
 
-  // Get staged diff
+  // Get staged diff (full context for CONTENT_FILTER matching)
   let stagedDiff: string;
   try {
-    stagedDiff = execSync('git diff --cached --unified=0', execOpts).trim();
+    stagedDiff = execSync('git diff --cached', execOpts).trim();
   } catch (err: any) {
     debugLog('pre-commit', 'ERROR: cannot read staged diff', { message: err.message });
     return; // Don't block on error
@@ -1567,97 +1556,290 @@ export async function handlePreCommit(): Promise<void> {
     return;
   }
 
-  // Parse added lines from the diff
-  const addedLines = parseStagedDiffLines(stagedDiff);
-  if (addedLines.length === 0) {
-    debugLog('pre-commit', 'SKIP: no added lines');
-    return;
+  // Get staged file list
+  let stagedFiles: string[] = [];
+  try {
+    const raw = execSync('git diff --cached --name-only', execOpts).trim();
+    stagedFiles = raw ? raw.split('\n') : [];
+  } catch { /* ignore */ }
+
+  // Get the commit message (from COMMIT_EDITMSG if available — works for commit-msg hook chain)
+  let commitMessage = '';
+  try {
+    const msgFile = path.join(repoPath, '.git', 'COMMIT_EDITMSG');
+    if (fs.existsSync(msgFile)) {
+      commitMessage = fs.readFileSync(msgFile, 'utf-8').trim();
+    }
+  } catch { /* ignore */ }
+
+  // ── Collect all violations from all policy checkers ──
+  interface PolicyViolation {
+    policyName: string;
+    policyType: string;
+    policyId?: string;
+    ruleId?: string;
+    action: string;
+    severity: string;
+    message: string;
   }
+  const violations: PolicyViolation[] = [];
 
-  // Scan for secrets using redaction engine patterns
-  const findings: Array<{ file: string; line: number; type: string; match: string }> = [];
-  const seen = new Set<string>();
+  // ── 1. Secret scanning (built-in, always runs unless disabled) ──
+  if (config?.secretScan !== false && repoConfig?.secretScan !== false) {
+    const addedLines = parseStagedDiffLines(stagedDiff);
+    const seen = new Set<string>();
 
-  for (const entry of addedLines) {
-    // Skip short lines and comments
-    const trimmed = entry.content.trim();
-    if (trimmed.length < 5) continue;
-    if (trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('*') || trimmed.startsWith('<!--')) continue;
+    for (const entry of addedLines) {
+      const trimmed = entry.content.trim();
+      if (trimmed.length < 5) continue;
+      if (trimmed.startsWith('//') || trimmed.startsWith('#') || trimmed.startsWith('*') || trimmed.startsWith('<!--')) continue;
 
-    for (const pattern of PRE_COMMIT_PATTERNS) {
-      pattern.regex.lastIndex = 0;
-      const match = pattern.regex.exec(entry.content);
-      if (match) {
-        const matchedValue = match[1] || match[0];
-        // Deduplicate by file + matched value (avoid specific + generic pattern duplicates)
-        const key = `${entry.file}:${entry.line}:${matchedValue}`;
-        if (seen.has(key)) continue;
-        seen.add(key);
+      for (const pattern of PRE_COMMIT_PATTERNS) {
+        pattern.regex.lastIndex = 0;
+        const match = pattern.regex.exec(entry.content);
+        if (match) {
+          const matchedValue = match[1] || match[0];
+          const key = `${entry.file}:${entry.line}:${matchedValue}`;
+          if (seen.has(key)) continue;
+          seen.add(key);
 
-        // Redact for display
-        const redacted = matchedValue.length <= 8
-          ? '****'
-          : matchedValue.slice(0, 4) + '****' + matchedValue.slice(-4);
+          const redacted = matchedValue.length <= 8
+            ? '****'
+            : matchedValue.slice(0, 4) + '****' + matchedValue.slice(-4);
 
-        findings.push({
-          file: entry.file,
-          line: entry.line,
-          type: pattern.name,
-          match: redacted,
-        });
+          violations.push({
+            policyName: 'Secret Detection',
+            policyType: 'SECRET_SCAN',
+            action: 'BLOCK',
+            severity: mapFindingSeverity(pattern.name).toUpperCase(),
+            message: `${pattern.name} in ${entry.file}:${entry.line} — ${redacted}`,
+          });
+        }
       }
     }
   }
 
-  if (findings.length === 0) {
-    debugLog('pre-commit', 'PASS: no secrets found');
-    return;
-  }
-
-  // Report to API if connected (so findings appear in Security tab in real-time)
+  // ── 2. Fetch org policies from Origin API and enforce locally ──
   const connected = isConnectedMode();
   if (connected) {
     try {
-      // Find active session for this repo
+      const policies = await api.getPolicies() as Array<{
+        id: string;
+        name: string;
+        type: string;
+        rules: Array<{
+          id: string;
+          condition: string;
+          action: string;
+          severity: string;
+          agentId: string | null;
+          machineId: string | null;
+          repoId: string | null;
+        }>;
+      }>;
+
+      for (const policy of policies) {
+        for (const rule of policy.rules) {
+          let cond: Record<string, any> = {};
+          try { cond = JSON.parse(rule.condition); } catch { continue; }
+
+          switch (policy.type) {
+            case 'FILE_RESTRICTION': {
+              const pathPattern = cond.path as string | undefined;
+              if (pathPattern) {
+                for (const file of stagedFiles) {
+                  if (matchGlobPreCommit(pathPattern, file)) {
+                    violations.push({
+                      policyName: policy.name,
+                      policyType: policy.type,
+                      policyId: policy.id,
+                      ruleId: rule.id,
+                      action: rule.action,
+                      severity: rule.severity,
+                      message: `File "${file}" matches restricted pattern "${pathPattern}"`,
+                    });
+                    break; // one match per rule is enough
+                  }
+                }
+              }
+              break;
+            }
+
+            case 'CONTENT_FILTER': {
+              const pattern = cond.pattern as string | undefined;
+              if (pattern) {
+                try {
+                  const flags = (cond.caseSensitive === false) ? 'gi' : 'g';
+                  const regex = new RegExp(pattern, flags);
+                  const matches = stagedDiff.match(regex);
+                  if (matches && matches.length > 0) {
+                    violations.push({
+                      policyName: policy.name,
+                      policyType: policy.type,
+                      policyId: policy.id,
+                      ruleId: rule.id,
+                      action: rule.action,
+                      severity: rule.severity,
+                      message: `Diff content matches "${pattern}" (${matches.length} match${matches.length !== 1 ? 'es' : ''})`,
+                    });
+                  }
+                } catch { /* invalid regex */ }
+              }
+              break;
+            }
+
+            case 'COMMIT_MESSAGE': {
+              if (!commitMessage) break;
+              const requiredPattern = cond.pattern as string | undefined;
+              const blockedPattern = cond.blocked_pattern as string | undefined;
+
+              if (requiredPattern) {
+                try {
+                  const regex = new RegExp(requiredPattern);
+                  if (!regex.test(commitMessage)) {
+                    violations.push({
+                      policyName: policy.name,
+                      policyType: policy.type,
+                      policyId: policy.id,
+                      ruleId: rule.id,
+                      action: rule.action,
+                      severity: rule.severity,
+                      message: `Commit message does not match required format "${requiredPattern}"`,
+                    });
+                  }
+                } catch { /* invalid regex */ }
+              }
+
+              if (blockedPattern) {
+                try {
+                  const flags = (cond.caseSensitive === false) ? 'i' : '';
+                  const regex = new RegExp(blockedPattern, flags);
+                  if (regex.test(commitMessage)) {
+                    violations.push({
+                      policyName: policy.name,
+                      policyType: policy.type,
+                      policyId: policy.id,
+                      ruleId: rule.id,
+                      action: rule.action,
+                      severity: rule.severity,
+                      message: `Commit message matches blocked pattern "${blockedPattern}"`,
+                    });
+                  }
+                } catch { /* invalid regex */ }
+              }
+              break;
+            }
+
+            case 'REQUIRE_REVIEW': {
+              // Check file path patterns only at pre-commit (cost/duration not available yet)
+              const pathPattern = cond.path as string | undefined;
+              if (pathPattern) {
+                for (const file of stagedFiles) {
+                  if (matchGlobPreCommit(pathPattern, file)) {
+                    violations.push({
+                      policyName: policy.name,
+                      policyType: policy.type,
+                      policyId: policy.id,
+                      ruleId: rule.id,
+                      action: 'REQUIRE_REVIEW',
+                      severity: rule.severity,
+                      message: `File "${file}" matches review pattern "${pathPattern}" — manual review required`,
+                    });
+                    break;
+                  }
+                }
+              }
+              break;
+            }
+
+            // COST_LIMIT and MODEL_ALLOWLIST not applicable at pre-commit time
+          }
+        }
+      }
+    } catch (err: any) {
+      debugLog('pre-commit', 'Policy fetch failed (non-fatal)', { message: err.message });
+      // Don't block on API failure — just skip policy checks
+    }
+  }
+
+  // ── No violations? Pass. ──
+  if (violations.length === 0) {
+    debugLog('pre-commit', 'PASS: no violations');
+    return;
+  }
+
+  // ── Report violations to API (Security tab) ──
+  if (connected) {
+    try {
       const sessions = listActiveSessions(repoPath);
-      const activeSession = sessions[0]; // Most recent active session
+      const activeSession = sessions[0];
       const sessionId = activeSession?.sessionId;
 
-      if (sessionId) {
-        await api.reportSecrets(sessionId, findings.map(f => ({
-          type: mapFindingType(f.type),
-          severity: mapFindingSeverity(f.type),
-          filePath: f.file,
-          lineNumber: f.line,
-          match: f.match,
-          ruleName: f.type,
-        }))).catch(() => {}); // Best effort — don't block on API failure
-        debugLog('pre-commit', 'reported findings to API', { sessionId, count: findings.length });
+      // Report secret findings
+      const secretFindings = violations.filter(v => v.policyType === 'SECRET_SCAN');
+      if (sessionId && secretFindings.length > 0) {
+        await api.reportSecrets(sessionId, secretFindings.map(f => ({
+          type: 'GENERIC_SECRET',
+          severity: f.severity.toLowerCase(),
+          filePath: f.message.split(' in ')[1]?.split(' —')[0] || '',
+          lineNumber: 0,
+          match: f.message,
+          ruleName: f.policyName,
+        }))).catch(() => {});
+      }
+
+      // Report policy violations
+      const policyViolations = violations.filter(v => v.policyId);
+      for (const v of policyViolations) {
+        await api.reportViolation({
+          machineId: config?.machineId || 'unknown',
+          policyId: v.policyId!,
+          description: `[pre-commit] ${v.message}`,
+          filepath: stagedFiles[0] || undefined,
+        }).catch(() => {});
       }
     } catch (err: any) {
       debugLog('pre-commit', 'API report failed (non-fatal)', { message: err.message });
     }
   }
 
-  // Block the commit
-  debugLog('pre-commit', 'BLOCKED: secrets found', { count: findings.length });
+  // ── Check if any violations have BLOCK action ──
+  const blockingViolations = violations.filter(
+    v => v.action.toUpperCase() === 'BLOCK' || v.policyType === 'SECRET_SCAN'
+  );
+  const warningViolations = violations.filter(
+    v => v.action.toUpperCase() !== 'BLOCK' && v.policyType !== 'SECRET_SCAN'
+  );
 
-  process.stderr.write('\n');
-  process.stderr.write('\x1b[1;31m  ✗ Origin: secrets detected in staged changes\x1b[0m\n');
-  process.stderr.write('\n');
-
-  for (const f of findings) {
-    process.stderr.write(`\x1b[31m    ${f.type}\x1b[0m\n`);
-    process.stderr.write(`    ${f.file}:${f.line}  ${f.match}\n\n`);
+  // Show warnings (non-blocking)
+  if (warningViolations.length > 0) {
+    process.stderr.write('\n');
+    process.stderr.write('\x1b[1;33m  ⚠ Origin: policy warnings\x1b[0m\n');
+    process.stderr.write('\n');
+    for (const v of warningViolations) {
+      process.stderr.write(`\x1b[33m    [${v.policyType}] ${v.policyName}\x1b[0m\n`);
+      process.stderr.write(`    ${v.message}\n\n`);
+    }
   }
 
-  process.stderr.write(`\x1b[33m  ${findings.length} secret${findings.length !== 1 ? 's' : ''} found. Commit blocked.\x1b[0m\n`);
-  process.stderr.write('\n');
-  process.stderr.write('\x1b[2m  To bypass: git commit --no-verify\x1b[0m\n');
-  process.stderr.write('\x1b[2m  To disable: origin config set secretScan false\x1b[0m\n');
-  process.stderr.write('\n');
+  // Block commit if any blocking violations
+  if (blockingViolations.length > 0) {
+    process.stderr.write('\n');
+    process.stderr.write('\x1b[1;31m  ✗ Origin: commit blocked by policy\x1b[0m\n');
+    process.stderr.write('\n');
 
-  process.exit(1);
+    for (const v of blockingViolations) {
+      process.stderr.write(`\x1b[31m    [${v.policyType}] ${v.policyName}\x1b[0m\n`);
+      process.stderr.write(`    ${v.message}\n\n`);
+    }
+
+    process.stderr.write(`\x1b[33m  ${blockingViolations.length} violation${blockingViolations.length !== 1 ? 's' : ''} found. Commit blocked.\x1b[0m\n`);
+    process.stderr.write('\n');
+    process.stderr.write('\x1b[2m  To bypass: git commit --no-verify\x1b[0m\n');
+    process.stderr.write('\n');
+
+    process.exit(1);
+  }
 }
 
 // Map finding type names to API types
@@ -1704,6 +1886,18 @@ const PRE_COMMIT_PATTERNS = [
   { name: 'Key Assignment', regex: /\w+_(?:API_?)?KEY\s*[:=]\s*['"]?([A-Za-z0-9_\-/.+=]{10,})['"]?/i },
   { name: 'Password Assignment', regex: /\w+_PASSWORD\s*[:=]\s*['"]?([^\s'"]{8,})['"]?/i },
 ];
+
+// Glob pattern matching for pre-commit policy checks
+function matchGlobPreCommit(pattern: string, filepath: string): boolean {
+  const escaped = pattern
+    .replace(/[.+^${}()|[\]\\]/g, '\\$&')
+    .replace(/\*\*/g, '<<<GLOBSTAR>>>')
+    .replace(/\*/g, '[^/]*')
+    .replace(/<<<GLOBSTAR>>>/g, '.*')
+    .replace(/\?/g, '.');
+  const regex = new RegExp(`^${escaped}$`);
+  return regex.test(filepath);
+}
 
 // Parse staged diff into file + line + content entries
 function parseStagedDiffLines(diff: string): Array<{ file: string; line: number; content: string }> {

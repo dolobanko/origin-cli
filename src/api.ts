@@ -111,4 +111,11 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ findings, source: 'pre-commit' }),
     }),
+
+  // Policy violation reporting (pre-commit hook)
+  reportViolation: (data: { machineId: string; policyId: string; description: string; filepath?: string }) =>
+    request('/api/mcp/violations', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    }),
 };
