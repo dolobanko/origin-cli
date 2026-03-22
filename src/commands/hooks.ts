@@ -16,6 +16,8 @@ import {
   getBranch,
   startHeartbeat,
   stopHeartbeat,
+  isHeartbeatAlive,
+  getStatePath,
   type SessionState,
   type SubagentRecord,
 } from '../session-state.js';
@@ -45,6 +47,40 @@ function debugLog(event: string, message: string, data?: any): void {
   } catch {
     // Never fail on logging
   }
+}
+
+// ─── Cursor Model Detection ──────────────────────────────────────────────
+// Cursor always sends model:"default" in hooks. Read the actual model from
+// Cursor's internal SQLite database (~/.cursor/ai-tracking/ai-code-tracking.db).
+
+function getCursorModelFromDb(conversationId: string): string | null {
+  try {
+    const dbPath = path.join(os.homedir(), '.cursor', 'ai-tracking', 'ai-code-tracking.db');
+    if (!fs.existsSync(dbPath)) return null;
+
+    // Use sqlite3 CLI to query — avoids native module dependency
+    const result = execSync(
+      `sqlite3 "${dbPath}" "SELECT model FROM conversation_summaries WHERE conversationId='${conversationId.replace(/'/g, "''")}' LIMIT 1"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
+    ).trim();
+    if (result && result !== 'default' && result !== 'unknown') return result;
+
+    // Fallback: check tracked_file_content or ai_code_hashes for this conversation
+    const result2 = execSync(
+      `sqlite3 "${dbPath}" "SELECT DISTINCT model FROM tracked_file_content WHERE conversationId='${conversationId.replace(/'/g, "''")}' AND model IS NOT NULL AND model != '' LIMIT 1"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
+    ).trim();
+    if (result2 && result2 !== 'default' && result2 !== 'unknown') return result2;
+
+    const result3 = execSync(
+      `sqlite3 "${dbPath}" "SELECT DISTINCT model FROM ai_code_hashes WHERE conversationId='${conversationId.replace(/'/g, "''")}' AND model IS NOT NULL AND model != '' LIMIT 1"`,
+      { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'], timeout: 2000 },
+    ).trim();
+    if (result3 && result3 !== 'default' && result3 !== 'unknown') return result3;
+  } catch {
+    // sqlite3 not available or DB locked — non-fatal
+  }
+  return null;
 }
 
 // ─── Session Write Helper ─────────────────────────────────────────────────
@@ -146,7 +182,7 @@ async function readStdin(): Promise<Record<string, any>> {
     process.stdin.on('end', () => {
       try {
         const parsed = JSON.parse(data);
-        debugLog('stdin', 'parsed', { keys: Object.keys(parsed), cwd: parsed.cwd, session_id: parsed.session_id });
+        debugLog('stdin', 'parsed', { keys: Object.keys(parsed), cwd: parsed.cwd, session_id: parsed.session_id, model: parsed.model });
         resolve(parsed);
       } catch {
         debugLog('stdin', 'parse-failed', { dataLength: data.length, preview: data.slice(0, 200) });
@@ -176,7 +212,7 @@ function escapeShellArg(arg: string): string {
 const AGENT_MODEL_PATTERNS: Record<string, RegExp> = {
   'claude': /claude|anthropic|sonnet|opus|haiku/i,
   'gemini': /gemini|google/i,
-  'cursor': /cursor|gpt|openai/i,
+  'cursor': /cursor|composer|gpt|openai/i,
   'codex': /codex/i,
   'aider': /aider/i,
   'windsurf': /windsurf|codeium/i,
@@ -218,6 +254,16 @@ function sessionMatchesAgent(session: SessionState, agentSlug: string): boolean 
  */
 function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?: string): { state: SessionState; saveCwd: string } | null {
   const repoPath = discoverGitRoot(hookCwd) || hookCwd;
+
+  // Debug: log what listActiveSessions finds
+  const debugSessions1 = listActiveSessions(hookCwd);
+  const debugSessions2 = hookCwd !== repoPath ? listActiveSessions(repoPath) : [];
+  debugLog('findStateForHook', 'scanning', {
+    hookCwd, repoPath,
+    sessionsInHookCwd: debugSessions1.length,
+    sessionsInRepoPath: debugSessions2.length,
+    tags: [...debugSessions1, ...debugSessions2].map(s => s.sessionTag),
+  });
 
   // 1. If we have a claude session ID, try exact match
   if (claudeSessionId) {
@@ -261,10 +307,24 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
       }
     }
 
-    // Multiple sessions, no reliable match — return null to avoid misattribution
-    debugLog('findStateForHook', 'ambiguous: multiple sessions, no reliable match', {
+    // Multiple sessions, no agent-specific match found.
+    // If we know the agent slug, pick the most recent session — it's better than
+    // returning null (which causes auto-create and duplicate sessions).
+    if (agentSlug) {
+      const best = sessions[0]; // already sorted by startedAt desc
+      debugLog('findStateForHook', 'multiple sessions, using most recent', {
+        agentSlug,
+        sessionId: best.sessionId,
+        model: best.model,
+        tag: best.sessionTag,
+        totalSessions: sessions.length,
+      });
+      return { state: best, saveCwd: best.repoPath || repoPath };
+    }
+
+    // No agent slug at all — truly ambiguous
+    debugLog('findStateForHook', 'ambiguous: multiple sessions, no agent slug', {
       claudeSessionId,
-      agentSlug,
       totalSessions: sessions.length,
       sessionModels: sessions.map(s => ({ id: s.sessionId, model: s.model })),
     });
@@ -323,6 +383,56 @@ function discoverGeminiTranscriptPath(): string | null {
   }
 }
 
+// ─── Codex Session Data Discovery ─────────────────────────────────────────
+
+interface CodexSessionData {
+  model: string;
+  tokensUsed: number;
+  inputTokens: number;
+  outputTokens: number;
+  prompt: string;
+}
+
+/**
+ * Codex CLI stores session data in ~/.codex/state_*.sqlite.
+ * Extract the most recent thread's data using the sqlite3 CLI.
+ */
+function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
+  try {
+    const codexDir = path.join(os.homedir(), '.codex');
+    // Find the most recent state sqlite file
+    const stateFiles = fs.readdirSync(codexDir)
+      .filter(f => f.startsWith('state_') && f.endsWith('.sqlite'))
+      .map(f => ({ name: f, path: path.join(codexDir, f), mtime: fs.statSync(path.join(codexDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    if (stateFiles.length === 0) return null;
+
+    const dbPath = stateFiles[0].path;
+
+    // Find the most recent thread matching this repo's cwd
+    const threadQuery = `SELECT model, tokens_used, first_user_message FROM threads WHERE cwd LIKE '%${path.basename(repoPath)}%' ORDER BY updated_at DESC LIMIT 1;`;
+    const raw = execSync(`sqlite3 "${dbPath}" "${threadQuery}"`, {
+      encoding: 'utf-8',
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    if (!raw) return null;
+    const parts = raw.split('|');
+    if (parts.length < 3) return null;
+
+    return {
+      model: parts[0] || 'codex',
+      tokensUsed: parseInt(parts[1], 10) || 0,
+      inputTokens: Math.round((parseInt(parts[1], 10) || 0) * 0.7), // estimate
+      outputTokens: Math.round((parseInt(parts[1], 10) || 0) * 0.3),
+      prompt: parts.slice(2).join('|') || '',
+    };
+  } catch {
+    return null;
+  }
+}
+
 // ─── Hook Handlers ─────────────────────────────────────────────────────────
 
 async function handleSessionStart(input: Record<string, any>, agentSlug?: string): Promise<void> {
@@ -363,9 +473,25 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     }
   }
 
-  // Use cwd from hook input (Claude Code passes this) or fall back to process.cwd()
-  const hookCwd = input.cwd || process.cwd();
-  debugLog('session-start', 'cwd resolved', { hookCwd, inputCwd: input.cwd, processCwd: process.cwd() });
+  // Skip background agents (Cursor fires session-start for background indexing agents)
+  if (input.is_background_agent === true || input.is_background_agent === 'true') {
+    debugLog('session-start', 'SKIP: background agent', { is_background_agent: input.is_background_agent });
+    return;
+  }
+
+  // Use cwd from hook input (Claude Code passes this), or workspace_roots (Cursor),
+  // or fall back to process.cwd()
+  let hookCwd = input.cwd || process.cwd();
+  // Cursor sends workspace_roots instead of cwd — ALWAYS prefer workspace_roots
+  // because Cursor runs hooks from ~/.cursor/ (not the project dir) and process.cwd()
+  // may point to a completely different repo.
+  if (input.workspace_roots && Array.isArray(input.workspace_roots) && input.workspace_roots.length > 0) {
+    const wsRoot = input.workspace_roots[0];
+    if (typeof wsRoot === 'string' && getGitRoot(wsRoot)) {
+      hookCwd = wsRoot;
+    }
+  }
+  debugLog('session-start', 'cwd resolved', { hookCwd, inputCwd: input.cwd, workspaceRoots: input.workspace_roots, processCwd: process.cwd() });
 
   // Only track sessions in git repos — no repo means no code to govern
   // Use discoverGitRoot to handle cases where cwd is a parent of the actual repo
@@ -387,7 +513,12 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     final: finalAgentSlug,
   });
 
-  const claudeSessionId = input.session_id || '';
+  // Cursor sends session_id but it changes per conversation/prompt — not stable.
+  // Only treat session_id as a stable identifier for agents that keep it consistent
+  // (Claude Code, Windsurf). For others (Cursor, Codex, Gemini), ignore it.
+  const agentsWithStableSessionId = ['claude-code', 'windsurf'];
+  const hasStableSessionId = agentsWithStableSessionId.includes(finalAgentSlug || '');
+  const claudeSessionId = hasStableSessionId ? (input.session_id || '') : '';
   let transcriptPath = input.transcript_path || '';
 
   // ── Concurrent session support ─────────────────────────────────────────────
@@ -408,6 +539,39 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         claudeSessionId,
       });
       return;
+    }
+  }
+
+  // ── Clean up stale sessions for non-Claude agents (Gemini, Codex, etc.) ──────
+  // These agents don't provide a session_id, so we can't deduplicate by ID.
+  // If SessionEnd didn't fire (user Ctrl+C'd, terminal closed), old state files
+  // linger and subsequent hooks attach to the wrong session.
+  // On session-start, force-end any prior sessions for the same agent in this repo.
+  if (!claudeSessionId) {
+    const staleSessions = finalAgentSlug ? listActiveSessions(repoPath).filter(s => sessionMatchesAgent(s, finalAgentSlug)) : listActiveSessions(repoPath);
+    for (const stale of staleSessions) {
+      debugLog('session-start', 'cleaning up stale session for same agent', {
+        staleSessionId: stale.sessionId,
+        staleTag: stale.sessionTag,
+        agent: finalAgentSlug,
+      });
+      // Kill the old heartbeat so it stops pinging
+      stopHeartbeat(stale.sessionId);
+      if (connected && stale.sessionId) {
+        try {
+          const durationMs = Date.now() - new Date(stale.startedAt).getTime();
+          await api.endSession({
+            sessionId: stale.sessionId,
+            prompt: stale.prompts.join('\n\n---\n\n') || undefined,
+            durationMs: durationMs > 0 ? durationMs : undefined,
+            branch: stale.branch || undefined,
+          });
+        } catch (err: any) {
+          debugLog('session-start', 'stale session end failed (non-fatal)', { message: err.message });
+        }
+      }
+      clearSessionState(repoPath, stale.sessionTag);
+      if (repoPath !== hookCwd) clearSessionState(hookCwd, stale.sessionTag);
     }
   }
 
@@ -441,10 +605,19 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     if (transcriptPath) debugLog('session-start', 'auto-discovered transcript path', { transcriptPath });
   }
 
-  // Resolve model: use stdin value, fall back to agent-specific default
+  // Resolve model: use stdin value, fall back to Cursor DB, then agent default
   let model = input.model || '';
-  if (!model || model === 'unknown') {
-    // Default model name from agent slug so we never store 'unknown'
+  if (!model || model === 'unknown' || model === 'default') {
+    // Cursor always sends model:"default" — try to read real model from its SQLite DB
+    if (finalAgentSlug === 'cursor' && input.conversation_id) {
+      const cursorModel = getCursorModelFromDb(input.conversation_id);
+      if (cursorModel) {
+        model = cursorModel;
+        debugLog('session-start', 'model from Cursor DB', { model: cursorModel, conversationId: input.conversation_id });
+      }
+    }
+  }
+  if (!model || model === 'unknown' || model === 'default') {
     const AGENT_DEFAULT_MODELS: Record<string, string> = {
       'gemini': 'gemini',
       'claude-code': 'claude',
@@ -568,8 +741,11 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 
     // Start background heartbeat daemon (only in connected mode)
     if (connected && config) {
-      startHeartbeat(sessionId, config.apiUrl || 'https://getorigin.io', config.apiKey);
-      debugLog('session-start', 'heartbeat started', { sessionId });
+      const stateFile = getStatePath(repoPath, sessionTag);
+      // For fire-and-forget agents (Codex, Gemini, Aider), the hook process exits
+      // immediately so we can't track parent PID — skip the parent check
+      startHeartbeat(sessionId, config.apiUrl || 'https://getorigin.io', config.apiKey, stateFile, finalAgentSlug);
+      debugLog('session-start', 'heartbeat started', { sessionId, stateFile, agentSlug: finalAgentSlug });
     }
 
     // Build system message: agent system prompt first, then tracking notice + policies
@@ -590,8 +766,14 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     process.stdout.write(output);
   } catch (err: any) {
     debugLog('session-start', 'ERROR', { message: err.message, stack: err.stack });
-    // Show clear message if agent was rejected (strict mode)
-    if (err.message?.includes('Unknown agent') || err.message?.includes('not registered')) {
+    const status = err.status || 0;
+    if (status === 401) {
+      process.stderr.write(`[origin] Session blocked — invalid or expired API key. Run \`origin login\` to re-authenticate.\n`);
+    } else if (status === 403) {
+      process.stderr.write(`[origin] Session blocked — ${err.message}\n`);
+    } else if (status === 429) {
+      process.stderr.write(`[origin] Session blocked — budget limit reached. ${err.message}\n`);
+    } else if (err.message?.includes('Unknown agent') || err.message?.includes('not registered')) {
       process.stderr.write(`[origin] Agent not registered. Ask your admin to add it in the Origin dashboard.\n`);
     } else {
       process.stderr.write(`[origin] session-start error: ${err.message}\n`);
@@ -600,19 +782,31 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
 }
 
 async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: string): Promise<void> {
-  debugLog('user-prompt-submit', 'begin', { hasPrompt: !!input.prompt, cwd: input.cwd });
+  debugLog('user-prompt-submit', 'begin', { hasPrompt: !!input.prompt, cwd: input.cwd, workspace_roots: input.workspace_roots });
 
-  const hookCwd = input.cwd || process.cwd();
+  let hookCwd = input.cwd || process.cwd();
+  // Cursor sends workspace_roots instead of cwd
+  if (input.workspace_roots && Array.isArray(input.workspace_roots) && input.workspace_roots.length > 0) {
+    const wsRoot = input.workspace_roots[0];
+    debugLog('user-prompt-submit', 'workspace_roots check', { wsRoot, isString: typeof wsRoot === 'string', gitRoot: typeof wsRoot === 'string' ? getGitRoot(wsRoot) : null });
+    if (typeof wsRoot === 'string' && getGitRoot(wsRoot)) {
+      hookCwd = wsRoot;
+    }
+  }
+  debugLog('user-prompt-submit', 'cwd resolved', { hookCwd });
 
   // ── Find session state using concurrent-aware lookup ────────────────────────
-  const found = findStateForHook(hookCwd, input.session_id);
+  // For agents with unstable session_id (Cursor, Codex), don't use it for lookup
+  const stableAgents = ['claude-code', 'windsurf'];
+  const lookupSessionId = stableAgents.includes(agentSlug || '') ? input.session_id : undefined;
+  const found = findStateForHook(hookCwd, lookupSessionId, agentSlug);
   let state = found?.state || null;
 
   if (state) {
     // Update Claude session ID and transcript path if they changed
     // (agent subprocesses may have different session_id)
     const incomingSessionId = input.session_id || '';
-    if (incomingSessionId && state.claudeSessionId !== incomingSessionId) {
+    if (incomingSessionId && stableAgents.includes(agentSlug || '') && state.claudeSessionId !== incomingSessionId) {
       debugLog('user-prompt-submit', 'updating claudeSessionId', {
         old: state.claudeSessionId,
         new: incomingSessionId,
@@ -649,6 +843,12 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         const model = input.model || (finalAgentSlug === 'gemini' ? 'gemini' : finalAgentSlug === 'codex' ? 'codex' : 'claude');
         const autoTag = (input.session_id || '').slice(0, 12) || `s${Date.now().toString(36)}`;
 
+        // Get git remote URL for better repo matching on the server
+        let repoUrl = '';
+        try {
+          repoUrl = execSync('git remote get-url origin', { cwd: repoPath, encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+        } catch { /* no remote — that's fine */ }
+
         let sessionId: string;
         if (isConnectedMode() && autoConfig) {
           const result = await api.startSession({
@@ -656,6 +856,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
             prompt: input.prompt || '',
             model,
             repoPath,
+            repoUrl: repoUrl || undefined,
             agentSlug: finalAgentSlug,
             branch: branch || undefined,
           });
@@ -664,7 +865,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           sessionId = `local-${crypto.randomUUID()}`;
         }
 
-        debugLog('user-prompt-submit', 'auto-created session', { sessionId, sessionTag: autoTag });
+        debugLog('user-prompt-submit', 'auto-created session', { sessionId, sessionTag: autoTag, repoPath, repoUrl });
         state = {
           sessionId,
           claudeSessionId: input.session_id || '',
@@ -678,8 +879,24 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           sessionTag: autoTag,
         };
         saveSessionState(state, repoPath, autoTag);
+
+        // Start heartbeat for auto-created sessions so they don't get cleaned up as stale
+        const connected = isConnectedMode();
+        if (connected && autoConfig) {
+          const stateFile = getStatePath(repoPath, autoTag);
+          startHeartbeat(sessionId, autoConfig.apiUrl || 'https://getorigin.io', autoConfig.apiKey, stateFile, finalAgentSlug);
+          debugLog('user-prompt-submit', 'heartbeat started for auto-created session', { sessionId, stateFile, agentSlug: finalAgentSlug });
+        }
       } catch (err: any) {
         debugLog('user-prompt-submit', 'auto-create failed', { message: err.message });
+        const status = err.status || 0;
+        if (status === 401) {
+          process.stderr.write(`[origin] Session blocked — invalid or expired API key. Run \`origin login\`.\n`);
+        } else if (status === 403) {
+          process.stderr.write(`[origin] Session blocked — ${err.message}\n`);
+        } else if (status === 429) {
+          process.stderr.write(`[origin] Session blocked — budget limit reached.\n`);
+        }
       }
     }
   }
@@ -734,7 +951,7 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         await api.updateSession(state.sessionId, {
           prompt: joinedPrompt || undefined,
           transcript: displayTranscript || undefined,
-          model: model && model !== 'unknown' ? model : undefined,
+          model: model && model !== 'unknown' && model !== 'default' ? model : undefined,
           filesChanged: parsed?.filesChanged && parsed.filesChanged.length > 0 ? parsed.filesChanged : undefined,
           tokensUsed: parsed?.tokensUsed || undefined,
           inputTokens: parsed?.inputTokens || undefined,
@@ -745,6 +962,14 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
           status: 'RUNNING',
         });
         debugLog('user-prompt-submit', 'heartbeat sent', { sessionId: state.sessionId, promptCount: state.prompts.length, costUsd });
+
+        // Restart heartbeat daemon if it died (e.g., Mac sleep killed it)
+        if (!isHeartbeatAlive(state.sessionId)) {
+          const saveCwd = found?.saveCwd || hookCwd;
+          const stateFile = getStatePath(saveCwd, state.sessionTag);
+          startHeartbeat(state.sessionId, config.apiUrl || 'https://getorigin.io', config.apiKey, stateFile, agentSlug);
+          debugLog('user-prompt-submit', 'heartbeat daemon restarted (was dead)', { sessionId: state.sessionId, agentSlug });
+        }
       }
     } catch (err: any) {
       debugLog('user-prompt-submit', 'heartbeat error (non-fatal)', { message: err.message });
@@ -754,16 +979,29 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
 }
 
 async function handleStop(input: Record<string, any>, agentSlug?: string): Promise<void> {
-  debugLog('stop', 'begin', { cwd: input.cwd });
+  debugLog('stop', 'begin', { cwd: input.cwd, inputModel: input.model, agentSlug });
 
   const config = loadConfig();
   const connected = isConnectedMode();
-  const hookCwd = input.cwd || process.cwd();
+  let hookCwd = input.cwd || process.cwd();
+  // Cursor sends workspace_roots instead of cwd
+  if (input.workspace_roots && Array.isArray(input.workspace_roots) && input.workspace_roots.length > 0) {
+    const wsRoot = input.workspace_roots[0];
+    if (typeof wsRoot === 'string' && getGitRoot(wsRoot)) {
+      hookCwd = wsRoot;
+    }
+  }
   const found = findStateForHook(hookCwd, input.session_id, agentSlug);
   const state = found?.state || null;
   if (!state) {
     debugLog('stop', 'ABORT: missing state', { hasConfig: !!config, hasState: !!state });
     return;
+  }
+
+  // Update model from stdin if it's a real model name (Cursor sends actual model in stop, not session-start)
+  if (input.model && input.model !== 'default' && input.model !== 'unknown' && input.model !== 'cursor') {
+    state.model = input.model;
+    debugLog('stop', 'model updated from stdin', { model: input.model });
   }
 
   // Update transcript path if provided
@@ -790,6 +1028,21 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     const displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
     debugLog('stop', 'formatted transcript', { displayLength: displayTranscript.length });
 
+    // For Codex: supplement with data from its SQLite database when transcript is missing
+    const codexData = (!state.transcriptPath && parsed.tokensUsed === 0)
+      ? discoverCodexSessionData(state.repoPath)
+      : null;
+    if (codexData) {
+      debugLog('stop', 'supplementing with Codex SQLite data', { model: codexData.model, tokens: codexData.tokensUsed });
+      if (!parsed.model) parsed.model = codexData.model;
+      parsed.tokensUsed = codexData.tokensUsed;
+      parsed.inputTokens = codexData.inputTokens;
+      parsed.outputTokens = codexData.outputTokens;
+      if (codexData.prompt && state.prompts.length === 0) {
+        state.prompts.push(codexData.prompt);
+      }
+    }
+
     // Use prompts from transcript if we captured them, else from state
     const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
 
@@ -802,11 +1055,21 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
 
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
-    const model = parsed.model || state.model;
+    // Prefer: stdin model → Cursor DB → transcript → state
+    const stdinModel = (input.model && input.model !== 'default' && input.model !== 'unknown') ? input.model : '';
+    let model = stdinModel || parsed.model || state.model;
+    // If still generic, try Cursor's SQLite DB
+    if ((!model || model === 'cursor' || model === 'default') && agentSlug === 'cursor' && input.conversation_id) {
+      const cursorDbModel = getCursorModelFromDb(input.conversation_id);
+      if (cursorDbModel) {
+        model = cursorDbModel;
+        debugLog('stop', 'model from Cursor DB', { model: cursorDbModel });
+      }
+    }
     const costUsd = estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens);
 
     // Extract prompt → file change mappings
-    const promptMappings = extractPromptFileMappings(state.transcriptPath);
+    let promptMappings = extractPromptFileMappings(state.transcriptPath);
     debugLog('stop', 'prompt mappings', { count: promptMappings.length });
 
     // Fall back to git-captured files if transcript parsing didn't find any
@@ -819,6 +1082,60 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       }
       filesChanged = Array.from(gitFiles);
       debugLog('stop', 'using git-captured files (transcript had none)', { count: filesChanged.length });
+    }
+
+    // For agents without transcripts (Codex, Gemini, Aider, Cursor): synthesize
+    // prompt→file mappings so prompts are visible in the UI even without file changes.
+    if (promptMappings.length === 0 && prompts.length > 0) {
+      // Helper: get diff for specific commits
+      const getCommitDiff = (shas: string[]): string => {
+        if (shas.length === 0) return gitCapture.diff || '';
+        try {
+          return shas.map(sha => {
+            try {
+              return execSync(`git show ${sha} --format="" --patch`, {
+                cwd: state.repoPath, encoding: 'utf-8',
+                stdio: ['pipe', 'pipe', 'pipe'],
+                maxBuffer: 5 * 1024 * 1024,
+              }).trim();
+            } catch { return ''; }
+          }).filter(Boolean).join('\n');
+        } catch { return ''; }
+      };
+
+      if (prompts.length === 1) {
+        // Single prompt → all files + full diff
+        promptMappings = [{
+          promptIndex: 0,
+          promptText: prompts[0].slice(0, 1000),
+          filesChanged: filesChanged,
+          diff: (gitCapture.diff || '').slice(0, 200_000),
+        }];
+      } else {
+        // Multiple prompts → distribute commits across prompts proportionally
+        const commitsPerPrompt = Math.max(1, Math.ceil(gitCapture.commitDetails.length / prompts.length));
+        promptMappings = prompts.map((prompt, idx) => {
+          const startCommit = idx * commitsPerPrompt;
+          const endCommit = Math.min(startCommit + commitsPerPrompt, gitCapture.commitDetails.length);
+          const promptFiles = new Set<string>();
+          const commitShas: string[] = [];
+          for (let i = startCommit; i < endCommit; i++) {
+            commitShas.push(gitCapture.commitDetails[i].sha);
+            for (const f of gitCapture.commitDetails[i].filesChanged) promptFiles.add(f);
+          }
+          // If no commits mapped to this prompt, use all files as fallback for the last prompt
+          if (promptFiles.size === 0 && idx === prompts.length - 1) {
+            for (const f of filesChanged) promptFiles.add(f);
+          }
+          return {
+            promptIndex: idx,
+            promptText: prompt.slice(0, 1000),
+            filesChanged: Array.from(promptFiles),
+            diff: getCommitDiff(commitShas).slice(0, 200_000),
+          };
+        });
+      }
+      debugLog('stop', 'synthesized prompt mappings from git', { count: promptMappings.length });
     }
 
     if (connected) {
@@ -866,11 +1183,27 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 }
 
 async function handleSessionEnd(input: Record<string, any>, agentSlug?: string): Promise<void> {
+  // Cursor fires sessionEnd after each prompt/task, NOT on actual exit.
+  // Treat it as an update (like Stop) so the session stays RUNNING.
+  // The heartbeat daemon detects when Cursor actually exits and ends the session.
+  const agentsWithFakeSessionEnd = ['cursor', 'codex'];
+  if (agentsWithFakeSessionEnd.includes(agentSlug || '')) {
+    debugLog('session-end', 'redirecting to handleStop (fake sessionEnd for this agent)', { agentSlug });
+    return handleStop(input, agentSlug);
+  }
+
   debugLog('session-end', 'begin', { cwd: input.cwd });
 
   const config = loadConfig();
   const connected = isConnectedMode();
-  const hookCwd = input.cwd || process.cwd();
+  let hookCwd = input.cwd || process.cwd();
+  // Cursor sends workspace_roots instead of cwd
+  if (input.workspace_roots && Array.isArray(input.workspace_roots) && input.workspace_roots.length > 0) {
+    const wsRoot = input.workspace_roots[0];
+    if (typeof wsRoot === 'string' && getGitRoot(wsRoot)) {
+      hookCwd = wsRoot;
+    }
+  }
   const found = findStateForHook(hookCwd, input.session_id, agentSlug);
   const state = found?.state || null;
   if (!state) {
@@ -912,7 +1245,9 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
     const joinedPrompt = redactedPrompts.join('\n\n---\n\n');
 
     const durationMs = Date.now() - new Date(state.startedAt).getTime();
-    const model = parsed.model || state.model;
+    // Prefer: stdin model → transcript → state
+    const stdinModel2 = (input.model && input.model !== 'default' && input.model !== 'unknown') ? input.model : '';
+    const model = stdinModel2 || parsed.model || state.model;
     const costUsd = estimateCost(model, parsed.inputTokens, parsed.outputTokens, parsed.cacheReadTokens, parsed.cacheCreationTokens);
 
     // Capture real git state: HEAD SHA, new commits, unified diff
@@ -1159,25 +1494,22 @@ export async function handlePostCommit(): Promise<void> {
     }
   }
 
-  // If no active session, detect if an AI agent CLI process is running
-  // This handles cases where agent hooks didn't fire (e.g., Gemini CLI)
-  if (!state) {
+  // If no active session AND no sessions were found at all, detect AI agent process.
+  // Only do this when there are truly zero sessions — if sessions exist but couldn't
+  // be disambiguated, we already warned above and shouldn't guess via pgrep.
+  if (!state && activeSessions.length === 0) {
     let detectedModel: string | null = null;
     try {
-      // Use pgrep for targeted process detection — look for CLI binaries, not desktop apps
+      // Use pgrep for targeted process detection — look for CLI binaries only,
+      // not desktop apps (Cursor/VS Code have many helper processes that would match)
       const checks = [
-        { cmd: 'pgrep -f "gemini.*cli|/gemini "', model: 'gemini' },
+        { cmd: 'pgrep -f "gemini.*cli|bin/gemini"', model: 'gemini' },
         { cmd: 'pgrep -f "claude.*stream-json"', model: 'claude' },
-        { cmd: 'pgrep -f "codex"', model: 'codex' },
-        { cmd: 'pgrep -f "aider"', model: 'aider' },
-        { cmd: 'pgrep -f "windsurf"', model: 'windsurf' },
+        { cmd: 'pgrep -f "bin/codex|@openai/codex"', model: 'codex' },
+        { cmd: 'pgrep -f "bin/aider|aider.*--model"', model: 'aider' },
         { cmd: 'pgrep -f "copilot.*cli|github-copilot"', model: 'copilot' },
-        { cmd: 'pgrep -f "continue.*dev"', model: 'continue' },
         { cmd: 'pgrep -f "amp.*cli|/amp "', model: 'amp' },
-        { cmd: 'pgrep -f "junie|jetbrains.*ai"', model: 'junie' },
         { cmd: 'pgrep -f "opencode"', model: 'opencode' },
-        { cmd: 'pgrep -f "rovo.*dev"', model: 'rovo' },
-        { cmd: 'pgrep -f "droid"', model: 'droid' },
       ];
       for (const check of checks) {
         try {

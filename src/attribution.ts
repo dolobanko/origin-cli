@@ -122,11 +122,13 @@ export function isAiCommit(repoPath: string, commitSha: string): boolean {
     const activeSessions = listActiveSessions(repoPath);
     for (const session of activeSessions) {
       if (session.headShaAtStart) {
+        // Check if commitSha is an ancestor of HEAD and descendant of headShaAtStart
         try {
           execSync(
             `git merge-base --is-ancestor ${session.headShaAtStart} ${commitSha}`,
             execOpts(repoPath),
           );
+          // If we get here, commitSha is after session start — it's an AI commit
           return true;
         } catch {
           // Not an ancestor — commit is before session start
