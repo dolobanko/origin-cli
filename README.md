@@ -185,19 +185,13 @@ origin blame / stats / diff / web read notes for attribution
 
 | Agent | Detection | Status |
 |-------|-----------|--------|
-| Claude Code | Session hooks + process detection | Stable |
-| Gemini CLI | Process detection | Stable |
-| Cursor | Session hooks | Stable |
-| Codex CLI | Session hooks + process detection | Stable |
-| Aider | Process detection | Stable |
-| Windsurf | Session hooks + process detection | Preview |
-| GitHub Copilot | Process detection | Preview |
-| Continue | Process detection | Preview |
-| Amp | Process detection | Preview |
-| Junie | Process detection | Preview |
-| OpenCode | Process detection | Preview |
-| Rovo Dev | Process detection | Preview |
-| Droid | Process detection | Preview |
+| Claude Code | Session hooks + process detection | ✅ Supported |
+| Cursor | Session hooks + Cursor DB | ✅ Supported |
+| Codex CLI | Session hooks + process detection | ✅ Supported |
+| Gemini CLI | Session hooks + process detection | ✅ Supported |
+| Windsurf | Session hooks | Coming soon |
+| Aider | Config hooks | Coming soon |
+| GitHub Copilot | Process detection | Coming soon |
 
 ### Data Storage
 
