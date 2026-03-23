@@ -60,7 +60,9 @@ Attribution:
   origin analyze                  Prompt pattern analytics
 
 Sessions:
-  origin sessions                 List sessions (--status, --model, --limit)
+  origin sessions                 List sessions for current repo (--status, --model, --limit, --all)
+  origin sessions --all           List sessions across all repos
+  origin sessions end <id>        End a running session
   origin session <id>             View session detail with full transcript
   origin export                   Export session data as CSV or JSON (--format, --output)
   origin resume [branch]          Resume session context for AI handoff
