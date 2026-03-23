@@ -100,7 +100,8 @@ origin session <id>             View session with full transcript
 origin explain [id]             Explain session with prompts and changes
 origin export                   Export session data as CSV/JSON
 origin resume [branch]          Resume session context for AI handoff
-origin share <id>               Create shareable session bundle
+origin share <id>               Share session (clipboard or --public URL)
+origin share <id> --public      Create public link: getorigin.io/s/<slug>
 ```
 
 </details>
