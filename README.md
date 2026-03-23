@@ -99,6 +99,7 @@ Maintenance:
 - **Prompt History** — every AI prompt that touched a file, with diffs
 - **AI Chat** — interactive assistant for natural language questions about your AI code
 - **Web Dashboard** — local browser UI with stats, commits, sessions, and prompts
+- **AI Attribution Context** — agents receive repo AI context at session start (what other agents wrote, top files, AI %)
 - **Session Tracking** — full transcript of every AI session stored in git
 - **Session Resume** — rebuild context from previous sessions for handoff between agents
 - **Search** — search all AI prompt history locally
