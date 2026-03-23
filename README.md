@@ -99,7 +99,8 @@ Maintenance:
 - **Prompt History** — every AI prompt that touched a file, with diffs
 - **AI Chat** — interactive assistant for natural language questions about your AI code
 - **Web Dashboard** — local browser UI with stats, commits, sessions, and prompts
-- **AI Attribution Context** — agents receive repo AI context at session start (what other agents wrote, top files, AI %)
+- **AI Attribution Context** — agents receive repo-level AI context at session start (what other agents wrote, top files, AI %)
+- **Per-File Attribution** — when an agent reads/edits a file, it receives line-level authorship context (who wrote each section)
 - **Session Tracking** — full transcript of every AI session stored in git
 - **Session Resume** — rebuild context from previous sessions for handoff between agents
 - **Search** — search all AI prompt history locally
@@ -111,7 +112,7 @@ Maintenance:
 - **Verify** — health check showing agent config, repo status, sessions, and attribution
 - **Secret Scanner** — pre-commit hook blocks commits containing hardcoded secrets, API keys, and credentials
 - **Attribution Preservation** — AI tags survive rebase, amend, cherry-pick, and stash
-- **Auto-Detection** — 13 agents detected automatically
+- **Auto-Detection** — 4 agents supported (Claude, Cursor, Codex, Gemini), more coming
 - **Git Notes** — per-commit AI metadata stored in `refs/notes/origin`
 
 ---
@@ -159,6 +160,42 @@ Origin includes a pre-commit hook that scans staged changes for hardcoded secret
 **Detected patterns:** AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, Slack tokens, JWTs, database connection strings, private keys, passwords, and generic `*_TOKEN=`, `*_SECRET=`, `*_KEY=`, `*_PASSWORD=` assignments.
 
 Installed automatically with `origin enable --global`. In connected mode, findings are reported to the platform Security tab in real-time.
+
+---
+
+## AI Attribution Context
+
+Origin automatically injects attribution context into AI agent system prompts so agents know what other agents have already done.
+
+### Repo-Level Context (session start)
+
+When a session starts, agents receive a summary of recent AI activity:
+
+```
+Repository AI context: 90% of recent commits (27/30) are AI-generated.
+Recent AI activity:
+  - claude-code wrote src/api.ts, src/hooks.ts on 2026-03-22 (claude-opus-4-6)
+  - gemini-cli wrote src/utils.ts on 2026-03-21 (gemini-2.5-pro)
+Top AI-modified files:
+  - src/commands/hooks.ts (8 AI commits)
+  - src/index.ts (7 AI commits)
+```
+
+### Per-File Context (pre-tool-use)
+
+When an agent reads or edits a file, it receives line-level authorship:
+
+```
+File attribution for src/hooks.ts: 95% AI-generated (2258/2388 lines).
+  Lines 1-28: claude-code (claude-opus-4-6)
+  Lines 217-240: human (KIRAN)
+  Lines 1461-1507: human (Artem Dolobanko)
+  Lines 1508-1794: claude-code (claude-opus-4-6)
+```
+
+Both features are automatic — no configuration needed. Data comes from git notes and git blame.
+
+> **Note:** Per-file attribution currently only works with Claude Code (the only agent supporting pre-tool-use hooks).
 
 ---
 
