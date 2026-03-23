@@ -1,4 +1,5 @@
 import chalk from 'chalk';
+import { execSync } from 'child_process';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
 import { computeAttributionStats, type AttributionStats } from '../attribution.js';
@@ -75,9 +76,9 @@ function displayLocalStats(stats: AttributionStats): void {
 
 // ─── Command ──────────────────────────────────────────────────────────────
 
-export async function statsCommand(opts?: { local?: boolean; dashboard?: boolean; range?: string }) {
+export async function statsCommand(opts?: { local?: boolean; dashboard?: boolean; range?: string; global?: boolean }) {
   // Default to local stats when in a git repo (per-repo, not global)
-  // Use --dashboard to see org-wide API stats
+  // Use --dashboard to see org-wide API stats, --global for all repos
   const cwd = process.cwd();
   const repoPath = getGitRoot(cwd);
 
@@ -98,11 +99,25 @@ export async function statsCommand(opts?: { local?: boolean; dashboard?: boolean
     return;
   }
 
-  // Remote (API) stats — original behavior
-  try {
-    const s = await api.getStats() as any;
+  // Remote (API) stats — scoped to current repo unless --global
+  const params: Record<string, string> = {};
+  let repoName = '';
+  if (!opts?.global && repoPath) {
+    try {
+      const remoteUrl = execSync('git remote get-url origin', { encoding: 'utf-8', cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+      const match = remoteUrl.match(/[/:]([^/]+\/[^/]+?)(?:\.git)?$/);
+      if (match) {
+        repoName = match[1];
+        params.repoName = repoName;
+      }
+    } catch {}
+  }
 
-    console.log(chalk.bold('\nOrigin Dashboard Stats\n'));
+  try {
+    const s = await api.getStats(params) as any;
+
+    const headerSuffix = repoName ? ` — ${repoName}` : opts?.global ? ' — all repos' : '';
+    console.log(chalk.bold(`\nOrigin Dashboard Stats${headerSuffix}\n`));
     console.log(`  ${chalk.gray('Sessions this week:')}   ${chalk.white(s.sessionsThisWeek)}`);
     console.log(`  ${chalk.gray('Active agents:')}        ${chalk.white(s.activeAgents)}`);
     console.log(`  ${chalk.gray('AI authorship:')}        ${chalk.cyan(s.aiPercentage + '%')}`);
