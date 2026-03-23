@@ -1,128 +1,182 @@
-# Origin CLI
+<p align="center">
+  <h1 align="center">Origin CLI</h1>
+  <p align="center"><strong>Know exactly what your AI agents are writing.</strong></p>
+</p>
 
-**Know exactly what your AI agents are writing.**
+<p align="center">
+  <a href="https://www.npmjs.com/package/@anthropic/origin-cli"><img src="https://img.shields.io/npm/v/@anthropic/origin-cli?color=blue&label=npm" alt="npm version"></a>
+  <a href="https://github.com/dolobanko/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
+  <a href="https://github.com/dolobanko/origin-cli/stargazers"><img src="https://img.shields.io/github/stars/dolobanko/origin-cli?style=social" alt="GitHub stars"></a>
+</p>
 
-Origin CLI tracks every AI coding session, provides line-level AI/human attribution, and gives you full visibility into AI-authored code. Works locally with zero setup — no server, no login, no API keys. All data stored in git.
+<p align="center">
+  Track every AI coding session. Line-level AI/human attribution. Full visibility into AI-authored code.<br/>
+  Zero setup — no server, no login, no API keys. All data stored in git.
+</p>
 
-For teams needing dashboard, policy enforcement, and compliance features — [Origin Connected](https://getorigin.io) is available as a managed service.
+<!-- TODO: Add screenshot of `origin blame` output -->
+<!-- <p align="center"><img src="docs/assets/origin-blame.png" width="700" alt="origin blame output"></p> -->
+
+---
+
+## 5 commands you'll use every day
+
+```bash
+origin blame src/index.ts   # Who wrote each line — AI or human?
+origin diff                  # Annotated diff with AI attribution
+origin stats                 # AI vs human breakdown for the repo
+origin sessions              # List all AI coding sessions
+origin web                   # Full dashboard in the browser
+```
+
+<!-- TODO: Add 30-second GIF demo: origin init → commit → origin blame -->
+<!-- <p align="center"><img src="docs/assets/demo.gif" width="700" alt="Origin demo"></p> -->
 
 ---
 
 ## Install
 
 ```bash
+# npm (recommended)
+npm i -g @anthropic/origin-cli
+
+# or direct
 npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ```
 
 ## Quick Start
 
 ```bash
-# 1. Initialize (auto-detects installed AI agents, installs global hooks)
-origin init
-
-# 2. Code with any AI agent — Origin tracks automatically
-
-# 3. See what AI wrote
-origin blame src/index.ts    # Line-level AI/human attribution
-origin stats                 # AI vs human breakdown
-origin diff                  # Annotated diff with attribution
-origin sessions              # List all AI sessions
-origin session <id>          # Full session transcript with prompts
-origin prompts src/index.ts  # AI prompts that touched this file
-origin web                   # Local dashboard in the browser
-origin chat                  # Ask questions in natural language (requires ANTHROPIC_API_KEY)
+origin init    # Auto-detects AI agents, installs hooks
+# ... code with any AI agent — Origin tracks automatically
+origin blame src/index.ts
 ```
 
 That's it. Everything stored locally in git notes and the `origin-sessions` branch.
 
 ---
 
+## Supported Agents
+
+| Agent | Hook Type | Status |
+|-------|-----------|--------|
+| <img src="https://cdn.simpleicons.org/anthropic/D97757" width="14"> **Claude Code** | Session hooks + process detection | **Supported** |
+| <img src="https://cdn.simpleicons.org/cursor/00A4EF" width="14"> **Cursor** | Session hooks + Cursor DB | **Supported** |
+| <img src="https://cdn.simpleicons.org/openai/412991" width="14"> **Codex CLI** | Session hooks + process detection | **Supported** |
+| <img src="https://cdn.simpleicons.org/google/4285F4" width="14"> **Gemini CLI** | Session hooks + process detection | **Supported** |
+| Windsurf | Session hooks | Coming soon |
+| Aider | Config hooks | Coming soon |
+| GitHub Copilot | Process detection | Coming soon |
+
+---
+
 ## Commands
 
+<details>
+<summary><strong>Attribution</strong> — see what AI wrote</summary>
+
 ```
-Setup:
-  origin init                     Initialize agent + install global hooks
-  origin enable [--global]        Install hooks + secret scanner (all repos or current repo)
-  origin disable [--global]       Remove hooks
-  origin status                   Show system status
-  origin upgrade                  Upgrade CLI to latest version
-
-Attribution:
-  origin blame <file>             AI/human attribution per line ([AI]/[HU] tags)
-  origin diff [range]             Annotated diff with AI/human attribution
-  origin stats                    AI vs human stats for current repo (--dashboard, --global)
-  origin compare <a> [b]          Compare AI attribution between branches or ranges
-  origin search <query>           Search AI prompt history
-  origin ask <query>              Query which AI session wrote specific code
-  origin prompts <file>           Show AI prompts that touched a file (--expand for diffs)
-  origin chat                     Interactive AI assistant — natural language questions
-  origin web                      Local web dashboard in the browser
-  origin analyze                  Prompt pattern analytics
-
-Sessions:
-  origin sessions                 List sessions for current repo (--status, --model, --limit, --all)
-  origin sessions --all           List sessions across all repos
-  origin sessions end <id>        End a running session
-  origin session <id>             View session detail with full transcript
-  origin export                   Export session data as CSV or JSON (--format, --output)
-  origin resume [branch]          Resume session context for AI handoff
-  origin explain [id]             Explain session with prompts and changes
-  origin share <id>               Create shareable session bundle
-
-Configuration:
-  origin config set <key> <val>   Set CLI config (secretScan, secretRedaction, etc.)
-  origin config get <key>         Get CLI config value
-  origin config list              List all config values
-  origin ignore                   List all ignore patterns (default + custom)
-  origin ignore add <pattern>     Add ignore pattern to .origin.json
-  origin ignore remove <pattern>  Remove ignore pattern
-  origin ignore test <filepath>   Test if a file would be ignored
-
-Time Travel:
-  origin rewind                   Rewind to previous AI checkpoint
-  origin trail                    Branch-centric work tracking
-
-Maintenance:
-  origin verify [--json]          Health check — agent config, repo, sessions, attribution
-  origin doctor [--fix]           Diagnose and fix issues
-  origin clean [--force]          Remove orphaned data
+origin blame <file>             AI/human attribution per line ([AI]/[HU] tags)
+origin diff [range]             Annotated diff with AI/human attribution
+origin stats                    AI vs human stats (--dashboard, --global)
+origin compare <a> [b]          Compare AI attribution between branches
+origin prompts <file>           AI prompts that touched a file (--expand for diffs)
+origin search <query>           Search AI prompt history
+origin ask <query>              Which AI session wrote specific code
+origin chat                     Interactive AI assistant (needs ANTHROPIC_API_KEY)
+origin web                      Local web dashboard
+origin analyze                  Prompt pattern analytics
 ```
+
+</details>
+
+<details>
+<summary><strong>Sessions</strong> — track AI activity</summary>
+
+```
+origin sessions                 List sessions for current repo (--status, --model, --all)
+origin sessions end <id>        End a running session
+origin session <id>             View session with full transcript
+origin explain [id]             Explain session with prompts and changes
+origin export                   Export session data as CSV/JSON
+origin resume [branch]          Resume session context for AI handoff
+origin share <id>               Create shareable session bundle
+```
+
+</details>
+
+<details>
+<summary><strong>Setup & Config</strong></summary>
+
+```
+origin init                     Initialize + install global hooks
+origin enable [--global]        Install hooks + secret scanner
+origin disable [--global]       Remove hooks
+origin status                   Show system status
+origin upgrade                  Upgrade CLI to latest version
+origin config set <key> <val>   Set CLI config
+origin config get <key>         Get config value
+origin config list              List all config
+origin ignore                   Manage ignore patterns
+```
+
+</details>
+
+<details>
+<summary><strong>Maintenance & Time Travel</strong></summary>
+
+```
+origin verify [--json]          Health check — agents, repo, sessions
+origin doctor [--fix]           Diagnose and fix issues
+origin clean [--force]          Remove orphaned data
+origin rewind                   Rewind to previous AI checkpoint
+origin trail                    Branch-centric work tracking
+```
+
+</details>
 
 ---
 
 ## Features
 
-- **AI Blame** — `[AI]`/`[HU]` tag per line with model name and git author
-- **AI Diff** — annotated diffs with AI/human attribution per line
-- **Stats** — AI vs human commit/line breakdown with tool and model charts
-- **Ask the Author** — find which AI session and prompt generated specific code
-- **Prompt History** — every AI prompt that touched a file, with diffs
-- **AI Chat** — interactive assistant for natural language questions about your AI code
-- **Web Dashboard** — local browser UI with stats, commits, sessions, and prompts
-- **AI Attribution Context** — agents receive repo-level AI context at session start (what other agents wrote, top files, AI %)
-- **Per-File Attribution** — when an agent reads/edits a file, it receives line-level authorship context (who wrote each section)
-- **Session Tracking** — full transcript of every AI session stored in git
-- **Session Resume** — rebuild context from previous sessions for handoff between agents
-- **Search** — search all AI prompt history locally
-- **Prompt Analytics** — detect prompting patterns and metrics
-- **Trail System** — branch-centric work tracking linking sessions to features
-- **Compare** — compare AI attribution between branches or commit ranges
-- **Export** — export session data as CSV or JSON for external analysis
-- **Ignore Patterns** — manage which files Origin skips during tracking
-- **Verify** — health check showing agent config, repo status, sessions, and attribution
-- **Secret Scanner** — pre-commit hook blocks commits containing hardcoded secrets, API keys, and credentials
-- **Attribution Preservation** — AI tags survive rebase, amend, cherry-pick, and stash
-- **Auto-Detection** — 4 agents supported (Claude, Cursor, Codex, Gemini), more coming
-- **Git Notes** — per-commit AI metadata stored in `refs/notes/origin`
+### AI Attribution Context
 
----
+Origin automatically injects context into AI agent system prompts so agents know what other agents have already done.
 
-## AI Chat Setup
+**Repo-level** (session start) — agents see a summary of recent AI activity:
+```
+Repository AI context: 90% of recent commits (27/30) are AI-generated.
+  - claude-code wrote src/api.ts, src/hooks.ts on 2026-03-22
+  - gemini-cli wrote src/utils.ts on 2026-03-21
+Top AI-modified files: src/commands/hooks.ts (8 AI commits)
+```
 
-`origin chat` uses the Anthropic API to answer natural language questions about your AI-authored code:
+**Per-file** (pre-tool-use) — when an agent reads/edits a file, it gets line-level authorship:
+```
+File attribution for src/hooks.ts: 95% AI-generated (2258/2388 lines).
+  Lines 1-28: claude-code (claude-opus-4-6)
+  Lines 217-240: human (KIRAN)
+  Lines 1508-1794: claude-code (claude-opus-4-6)
+```
+
+Both features are automatic. Data comes from git notes and git blame.
+
+### Secret Scanner
+
+Pre-commit hook blocks commits containing hardcoded secrets:
+
+```
+  AWS Access Key     config.env:3   AKIA****MPLE
+  GitHub Token       src/api.ts:12  ghp_****ab12
+  2 secrets found. Commit blocked.
+```
+
+Detects: AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, Slack tokens, JWTs, database connection strings, private keys, and `*_TOKEN=`/`*_SECRET=`/`*_KEY=` patterns.
+
+### AI Chat
 
 ```bash
-export ANTHROPIC_API_KEY=sk-ant-...    # Add to ~/.zshrc or ~/.bashrc
+export ANTHROPIC_API_KEY=<your-key>   # Add to ~/.zshrc
 origin chat
 ```
 
@@ -138,98 +192,15 @@ Single question mode: `origin chat -q "what did AI touch last week?"`
 
 ---
 
-## Secret Scanner
-
-Origin includes a pre-commit hook that scans staged changes for hardcoded secrets and blocks the commit if any are found.
-
-```
-  ✗ Origin: secrets detected in staged changes
-
-    AWS Access Key
-    config.env:3  AKIA****MPLE
-
-    GitHub Token
-    src/api.ts:12  ghp_****ab12
-
-  2 secrets found. Commit blocked.
-
-  To bypass: git commit --no-verify
-  To disable: origin config set secretScan false
-```
-
-**Detected patterns:** AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, Slack tokens, JWTs, database connection strings, private keys, passwords, and generic `*_TOKEN=`, `*_SECRET=`, `*_KEY=`, `*_PASSWORD=` assignments.
-
-Installed automatically with `origin enable --global`. In connected mode, findings are reported to the platform Security tab in real-time.
-
----
-
-## AI Attribution Context
-
-Origin automatically injects attribution context into AI agent system prompts so agents know what other agents have already done.
-
-### Repo-Level Context (session start)
-
-When a session starts, agents receive a summary of recent AI activity:
-
-```
-Repository AI context: 90% of recent commits (27/30) are AI-generated.
-Recent AI activity:
-  - claude-code wrote src/api.ts, src/hooks.ts on 2026-03-22 (claude-opus-4-6)
-  - gemini-cli wrote src/utils.ts on 2026-03-21 (gemini-2.5-pro)
-Top AI-modified files:
-  - src/commands/hooks.ts (8 AI commits)
-  - src/index.ts (7 AI commits)
-```
-
-### Per-File Context (pre-tool-use)
-
-When an agent reads or edits a file, it receives line-level authorship:
-
-```
-File attribution for src/hooks.ts: 95% AI-generated (2258/2388 lines).
-  Lines 1-28: claude-code (claude-opus-4-6)
-  Lines 217-240: human (KIRAN)
-  Lines 1461-1507: human (Artem Dolobanko)
-  Lines 1508-1794: claude-code (claude-opus-4-6)
-```
-
-Both features are automatic — no configuration needed. Data comes from git notes and git blame.
-
-> **Note:** Per-file attribution currently only works with Claude Code (the only agent supporting pre-tool-use hooks).
-
----
-
 ## How It Works
 
 ```
-AI Agent stages code
-        ↓
-Pre-commit hook scans for secrets → blocks if found
-        ↓
-Commit goes through
-        ↓
-Post-commit hook fires
-        ↓
-Origin detects AI process (pgrep) or active session
-        ↓
-Writes git note to refs/notes/origin with model, session, cost
-        ↓
-Writes session data to origin-sessions branch
-        ↓
-origin blame / stats / diff / web read notes for attribution
+AI Agent commits code → Post-commit hook fires → Origin detects AI process
+→ Writes git note (model, session, cost) → Writes session to origin-sessions branch
+→ origin blame / stats / diff read notes for attribution
 ```
 
-### Supported Agents
-
-| Agent | Detection | Status |
-|-------|-----------|--------|
-| Claude Code | Session hooks + process detection | ✅ Supported |
-| Cursor | Session hooks + Cursor DB | ✅ Supported |
-| Codex CLI | Session hooks + process detection | ✅ Supported |
-| Gemini CLI | Session hooks + process detection | ✅ Supported |
-| Windsurf | Session hooks | Coming soon |
-| Aider | Config hooks | Coming soon |
-| GitHub Copilot | Process detection | Coming soon |
+Pre-commit hook scans for secrets and blocks if found.
 
 ### Data Storage
 
@@ -239,20 +210,33 @@ origin blame / stats / diff / web read notes for attribution
 | `origin-sessions` branch | Session transcripts, prompts, file changes |
 | `~/.origin/config.json` | CLI config |
 | `~/.origin/git-hooks/` | Global hook scripts |
-| `~/.origin/db/prompts.json` | Local prompt database for search |
 
 ---
 
-## Connected Mode
+## Origin vs Alternatives
 
-For teams needing centralized governance, connect to [Origin Platform](https://getorigin.io):
+| Feature | Origin | git-ai | Entire.io |
+|---------|--------|--------|-----------|
+| Line-level attribution | **Yes** — per-line AI/human tags | Commit-level only | No |
+| Local-first / no server | **Yes** — git notes, zero setup | Yes | No — SaaS only |
+| Multi-agent support | **4 agents**, more coming | Claude only | GitHub Copilot only |
+| Session transcripts | **Full prompts + responses** | No | No |
+| Per-file context injection | **Yes** — agents see authorship | No | No |
+| Secret scanning | **Built-in** pre-commit hook | No | No |
+| Open source | **MIT** | MIT | Closed |
+
+---
+
+## For Teams
+
+**[getorigin.io](https://getorigin.io)** — centralized dashboard, policy enforcement, PR compliance. Free trial.
+
+Connected mode adds: real-time dashboard, model/cost policies, PR blocking (`[AI 73%]` annotations on GitHub PRs), compliance reports, team leaderboards, Slack notifications, and GitHub App integration.
 
 ```bash
 origin login    # Authenticate with your Origin instance
 origin init     # Register machine + install hooks
 ```
-
-Connected mode adds: dashboard, policy enforcement, PR blocking, commit annotations (`[AI 73%]` on GitHub PRs), compliance reports, team leaderboards, Slack notifications, and GitHub App integration.
 
 ---
 
