@@ -50,7 +50,7 @@ Setup:
 Attribution:
   origin blame <file>             AI/human attribution per line ([AI]/[HU] tags)
   origin diff [range]             Annotated diff with AI/human attribution
-  origin stats                    AI vs human commit/line breakdown with charts
+  origin stats                    AI vs human stats for current repo (--dashboard, --global)
   origin compare <a> [b]          Compare AI attribution between branches or ranges
   origin search <query>           Search AI prompt history
   origin ask <query>              Query which AI session wrote specific code
