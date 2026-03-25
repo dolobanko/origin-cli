@@ -11,7 +11,8 @@
 
 <p align="center">
   Track every AI coding session. Line-level AI/human attribution. Full visibility into AI-authored code.<br/>
-  Zero setup — no server, no login, no API keys. All data stored in git.
+  Zero setup — no server, no login, no API keys. All data stored in git.<br/>
+  Origin supports Cursor Agent Trace v0.1.0 standard.
 </p>
 
 <!-- TODO: Add screenshot of `origin blame` output -->
