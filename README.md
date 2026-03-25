@@ -40,12 +40,14 @@ These are the commands you'll use every day:
 
 ```bash
 origin blame <file>              # Line-by-line AI/human attribution
+origin sessions                  # List all AI coding sessions
+origin backfill                  # Retroactively tag old commits as AI/human
+origin rework                    # Detect AI code that got reworked by humans
+origin search "auth bug"         # Find the prompt that introduced code
 origin diff                      # Annotated diff — see AI changes in context
 origin stats                     # AI vs human breakdown for the repo
-origin sessions                  # List all AI coding sessions
-origin prompts <file>            # See which AI prompts touched a file
-origin search "auth bug"         # Find the prompt that introduced code
-origin backfill                  # Retroactively tag old commits as AI/human
+origin report                    # Sprint report — cost, models, ROI
+origin audit                     # Compliance audit trail (SOC 2 / ISO 27001)
 ```
 
 ---
