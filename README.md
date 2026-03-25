@@ -27,6 +27,8 @@ origin blame src/index.ts   # Who wrote each line — AI or human?
 origin diff                  # Annotated diff with AI attribution
 origin stats                 # AI vs human breakdown for the repo
 origin sessions              # List all AI coding sessions
+origin report                # Sprint report with cost & activity breakdown
+origin search "auth bug"     # Full-text search across all prompts
 origin web                   # Full dashboard in the browser
 ```
 
@@ -82,7 +84,7 @@ origin diff [range]             Annotated diff with AI/human attribution
 origin stats                    AI vs human stats (--dashboard, --global)
 origin compare <a> [b]          Compare AI attribution between branches
 origin prompts <file>           AI prompts that touched a file (--expand for diffs)
-origin search <query>           Search AI prompt history
+origin search <query>           Full-text search across all prompts (--from, --agent, --limit)
 origin ask <query>              Which AI session wrote specific code
 origin chat                     Interactive AI assistant (needs ANTHROPIC_API_KEY)
 origin web                      Local web dashboard
@@ -99,11 +101,26 @@ origin sessions                 List sessions for current repo (--status, --mode
 origin sessions end <id>        End a running session
 origin session <id>             View session with full transcript
 origin explain [id]             Explain session with prompts and changes
-origin export                   Export session data as CSV/JSON
+origin export                   Export session data as CSV/JSON/agent-trace
 origin resume [branch]          Resume session context for AI handoff
 origin share <id>               Share session (clipboard or --public URL)
 origin share <id> --public      Create public link: getorigin.io/s/<slug>
 ```
+
+</details>
+
+<details>
+<summary><strong>Reporting & Compliance</strong></summary>
+
+```
+origin report                   Sprint report with cost/activity breakdown
+                                  --range 7d|14d|30d  --format md|json|csv  --output <file>
+origin audit                    SOC 2 / ISO 27001 compliance audit trail
+                                  --from <date>  --to <date>  --author <name>  --agent <name>
+                                  --format md|json|csv  --output <file>
+```
+
+All reporting commands work in both connected and standalone mode.
 
 </details>
 
@@ -136,6 +153,49 @@ origin trail                    Branch-centric work tracking
 ```
 
 </details>
+
+---
+
+## Usage Examples
+
+### Sprint Reports
+
+```bash
+origin report                        # 7-day report (default)
+origin report --range 30d            # Last 30 days
+origin report --format csv --output sprint.csv
+```
+
+Reports include cost breakdown by model and user, agent usage stats, top modified files, and a daily activity chart.
+
+### Compliance Audit
+
+```bash
+origin audit --from 2026-01-01 --to 2026-03-31
+origin audit --author kiran --format json --output audit.json
+origin audit --agent claude-code --from 2026-03-01
+```
+
+Generates SOC 2 / ISO 27001 audit trails with session logs, policy enforcement events, and file-level attribution.
+
+### Prompt Search
+
+```bash
+origin search "fix auth bug"
+origin search "refactor" --agent cursor --from 2026-03-01
+origin search "database migration" --limit 5
+```
+
+Full-text search across all stored prompts with keyword highlighting.
+
+### Agent Trace Export
+
+```bash
+origin export --format agent-trace
+origin export --format agent-trace --session abc123 --output trace.json
+```
+
+Exports session data in the Cursor Agent Trace v0.1.0 format.
 
 ---
 
