@@ -4,7 +4,6 @@
 </p>
 
 <p align="center">
-  <a href="https://www.npmjs.com/package/@anthropic/origin-cli"><img src="https://img.shields.io/npm/v/@anthropic/origin-cli?color=blue&label=npm" alt="npm version"></a>
   <a href="https://github.com/dolobanko/origin-cli/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-green" alt="License"></a>
   <a href="https://github.com/dolobanko/origin-cli/stargazers"><img src="https://img.shields.io/github/stars/dolobanko/origin-cli?style=social" alt="GitHub stars"></a>
 </p>
@@ -12,50 +11,41 @@
 <p align="center">
   Track every AI coding session. Line-level AI/human attribution. Full visibility into AI-authored code.<br/>
   Zero setup — no server, no login, no API keys. All data stored in git.<br/>
-  Origin supports Cursor Agent Trace v0.1.0 standard.
+  Supports Cursor Agent Trace v0.1.0 standard.
 </p>
-
-<!-- TODO: Add screenshot of `origin blame` output -->
-<!-- <p align="center"><img src="docs/assets/origin-blame.png" width="700" alt="origin blame output"></p> -->
-
----
-
-## 5 commands you'll use every day
-
-```bash
-origin blame src/index.ts   # Who wrote each line — AI or human?
-origin diff                  # Annotated diff with AI attribution
-origin stats                 # AI vs human breakdown for the repo
-origin sessions              # List all AI coding sessions
-origin report                # Sprint report with cost & activity breakdown
-origin search "auth bug"     # Full-text search across all prompts
-origin web                   # Full dashboard in the browser
-```
-
-<!-- TODO: Add 30-second GIF demo: origin init → commit → origin blame -->
-<!-- <p align="center"><img src="docs/assets/demo.gif" width="700" alt="Origin demo"></p> -->
 
 ---
 
 ## Install
 
 ```bash
-# npm (recommended)
-npm i -g @anthropic/origin-cli
-
-# or direct
 npm i -g https://getorigin.io/cli/origin-cli-latest.tgz
 ```
 
 ## Quick Start
 
 ```bash
-origin init    # Auto-detects AI agents, installs hooks
+origin init                     # Auto-detects agents, installs hooks
 # ... code with any AI agent — Origin tracks automatically
-origin blame src/index.ts
+origin blame src/index.ts       # See who wrote each line
 ```
 
 That's it. Everything stored locally in git notes and the `origin-sessions` branch.
+
+---
+
+## Top Commands
+
+These are the commands you'll use every day:
+
+```bash
+origin blame <file>              # Line-by-line AI/human attribution
+origin diff                      # Annotated diff — see AI changes in context
+origin stats                     # AI vs human breakdown for the repo
+origin sessions                  # List all AI coding sessions
+origin search "auth bug"         # Find the prompt that introduced code
+origin backfill                  # Retroactively tag old commits as AI/human
+```
 
 ---
 
@@ -73,37 +63,35 @@ That's it. Everything stored locally in git notes and the `origin-sessions` bran
 
 ---
 
-## Commands
+## All Commands
 
 <details>
-<summary><strong>Attribution</strong> — see what AI wrote</summary>
+<summary><strong>Attribution & Analysis</strong></summary>
 
 ```
-origin blame <file>             AI/human attribution per line ([AI]/[HU] tags)
-origin diff [range]             Annotated diff with AI/human attribution
+origin blame <file>             Line-by-line AI/human attribution
+origin diff [range]             Annotated diff with AI attribution
 origin stats                    AI vs human stats (--dashboard, --global)
-origin compare <a> [b]          Compare AI attribution between branches
-origin prompts <file>           AI prompts that touched a file (--expand for diffs)
-origin search <query>           Full-text search across all prompts (--from, --agent, --limit)
+origin compare <a> [b]          Compare attribution between branches
+origin prompts <file>           AI prompts that touched a file
+origin search <query>           Full-text search across prompts (--from, --agent)
 origin ask <query>              Which AI session wrote specific code
-origin chat                     Interactive AI assistant (needs ANTHROPIC_API_KEY)
-origin web                      Local web dashboard
-origin analyze                  Prompt pattern analytics
+origin rework                   Detect AI code that got reworked (--days)
+origin backfill                 Retroactive AI tagging (--apply, --days, --min-confidence)
 ```
 
 </details>
 
 <details>
-<summary><strong>Sessions</strong> — track AI activity</summary>
+<summary><strong>Sessions & Sharing</strong></summary>
 
 ```
-origin sessions                 List sessions for current repo (--status, --model, --all)
+origin sessions                 List sessions for current repo (--all for everything)
 origin sessions end <id>        End a running session
 origin session <id>             View session with full transcript
 origin explain [id]             Explain session with prompts and changes
 origin export                   Export session data as CSV/JSON/agent-trace
-origin resume [branch]          Resume session context for AI handoff
-origin share <id>               Share session (clipboard or --public URL)
+origin share <id>               Copy session link to clipboard
 origin share <id> --public      Create public link: getorigin.io/s/<slug>
 ```
 
@@ -113,43 +101,26 @@ origin share <id> --public      Create public link: getorigin.io/s/<slug>
 <summary><strong>Reporting & Compliance</strong></summary>
 
 ```
-origin report                   Sprint report with cost/activity breakdown
-                                  --range 7d|14d|30d  --format md|json|csv  --output <file>
+origin report                   Sprint report — cost, models, users, ROI
+                                  --range 7d|14d|30d  --format md|json|csv
 origin audit                    SOC 2 / ISO 27001 compliance audit trail
-                                  --from <date>  --to <date>  --author <name>  --agent <name>
-                                  --format md|json|csv  --output <file>
+                                  --from <date>  --to <date>  --format md|json|csv
 ```
-
-All reporting commands work in both connected and standalone mode.
 
 </details>
 
 <details>
-<summary><strong>Setup & Config</strong></summary>
+<summary><strong>Setup & Maintenance</strong></summary>
 
 ```
-origin init                     Initialize + install global hooks
+origin init                     Initialize + install hooks
 origin enable [--global]        Install hooks + secret scanner
 origin disable [--global]       Remove hooks
 origin status                   Show system status
 origin upgrade                  Upgrade CLI to latest version
-origin config set <key> <val>   Set CLI config
-origin config get <key>         Get config value
-origin config list              List all config
-origin ignore                   Manage ignore patterns
-```
-
-</details>
-
-<details>
-<summary><strong>Maintenance & Time Travel</strong></summary>
-
-```
-origin verify [--json]          Health check — agents, repo, sessions
 origin doctor [--fix]           Diagnose and fix issues
+origin verify                   Health check — agents, repo, sessions
 origin clean [--force]          Remove orphaned data
-origin rewind                   Rewind to previous AI checkpoint
-origin trail                    Branch-centric work tracking
 ```
 
 </details>
@@ -158,44 +129,51 @@ origin trail                    Branch-centric work tracking
 
 ## Usage Examples
 
-### Sprint Reports
+### Who wrote this code?
 
 ```bash
-origin report                        # 7-day report (default)
-origin report --range 30d            # Last 30 days
-origin report --format csv --output sprint.csv
+origin blame src/api.ts
+```
+```
+  1 | Claude   | 3h ago  | import express from 'express';
+  2 | Claude   | 3h ago  | import { prisma } from './db';
+  3 | Human    | 2d ago  |
+  4 | Gemini   | 1h ago  | export async function getUsers() {
+  5 | Gemini   | 1h ago  |   const users = await prisma.user.findMany();
+  6 | Cursor   | 30m ago |   return users.filter(u => u.active);
+
+10 lines  Claude: 40%  Gemini: 30%  Cursor: 10%  Human: 20%
 ```
 
-Reports include cost breakdown by model and user, agent usage stats, top modified files, and a daily activity chart.
-
-### Compliance Audit
+### Retroactive attribution (for repos that existed before Origin)
 
 ```bash
-origin audit --from 2026-01-01 --to 2026-03-31
-origin audit --author kiran --format json --output audit.json
-origin audit --agent claude-code --from 2026-03-01
+origin backfill                      # Dry-run — shows what it would tag
+origin backfill --apply              # Actually write the tags
+origin backfill --days 180           # Go back 6 months
+origin backfill --min-confidence high # Only tag high-confidence matches
 ```
 
-Generates SOC 2 / ISO 27001 audit trails with session logs, policy enforcement events, and file-level attribution.
+Scans `.claude/`, `.cursor/`, `.codex/` session history, commit message patterns, and code style heuristics to retroactively identify AI-generated commits.
 
-### Prompt Search
+### Find the prompt behind any code
 
 ```bash
-origin search "fix auth bug"
+origin search "authentication"
 origin search "refactor" --agent cursor --from 2026-03-01
-origin search "database migration" --limit 5
 ```
 
-Full-text search across all stored prompts with keyword highlighting.
-
-### Agent Trace Export
+### Sprint report
 
 ```bash
-origin export --format agent-trace
-origin export --format agent-trace --session abc123 --output trace.json
+origin report --range 14d --format json --output sprint.json
 ```
 
-Exports session data in the Cursor Agent Trace v0.1.0 format.
+### Compliance audit
+
+```bash
+origin audit --from 2026-01-01 --to 2026-03-31 --format json
+```
 
 ---
 
@@ -205,23 +183,19 @@ Exports session data in the Cursor Agent Trace v0.1.0 format.
 
 Origin automatically injects context into AI agent system prompts so agents know what other agents have already done.
 
-**Repo-level** (session start) — agents see a summary of recent AI activity:
+**Repo-level** (session start):
 ```
 Repository AI context: 90% of recent commits (27/30) are AI-generated.
   - claude-code wrote src/api.ts, src/hooks.ts on 2026-03-22
   - gemini-cli wrote src/utils.ts on 2026-03-21
-Top AI-modified files: src/commands/hooks.ts (8 AI commits)
 ```
 
-**Per-file** (pre-tool-use) — when an agent reads/edits a file, it gets line-level authorship:
+**Per-file** (when an agent reads/edits a file):
 ```
 File attribution for src/hooks.ts: 95% AI-generated (2258/2388 lines).
   Lines 1-28: claude-code (claude-opus-4-6)
   Lines 217-240: human (KIRAN)
-  Lines 1508-1794: claude-code (claude-opus-4-6)
 ```
-
-Both features are automatic. Data comes from git notes and git blame.
 
 ### Secret Scanner
 
@@ -233,24 +207,7 @@ Pre-commit hook blocks commits containing hardcoded secrets:
   2 secrets found. Commit blocked.
 ```
 
-Detects: AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, Slack tokens, JWTs, database connection strings, private keys, and `*_TOKEN=`/`*_SECRET=`/`*_KEY=` patterns.
-
-### AI Chat
-
-```bash
-export ANTHROPIC_API_KEY=<your-key>   # Add to ~/.zshrc
-origin chat
-```
-
-```
-  you > who wrote the auth module?
-  Claude 3.5 Sonnet wrote src/auth.ts across 3 sessions...
-
-  you > how much have I spent on AI this month?
-  $4.32 across 23 sessions. Claude: $3.18 (74%), Gemini: $1.14 (26%)
-```
-
-Single question mode: `origin chat -q "what did AI touch last week?"`
+Detects: AWS keys, GitHub/GitLab tokens, OpenAI/Anthropic/Stripe keys, JWTs, database connection strings, private keys, and `*_TOKEN=`/`*_SECRET=`/`*_KEY=` patterns.
 
 ---
 
@@ -261,8 +218,6 @@ AI Agent commits code → Post-commit hook fires → Origin detects AI process
 → Writes git note (model, session, cost) → Writes session to origin-sessions branch
 → origin blame / stats / diff read notes for attribution
 ```
-
-Pre-commit hook scans for secrets and blocks if found.
 
 ### Data Storage
 
@@ -280,6 +235,7 @@ Pre-commit hook scans for secrets and blocks if found.
 | Feature | Origin | git-ai | Entire.io |
 |---------|--------|--------|-----------|
 | Line-level attribution | **Yes** — per-line AI/human tags | Commit-level only | No |
+| Retroactive tagging | **Yes** — `origin backfill` | No | No |
 | Local-first / no server | **Yes** — git notes, zero setup | Yes | No — SaaS only |
 | Multi-agent support | **4 agents**, more coming | Claude only | GitHub Copilot only |
 | Session transcripts | **Full prompts + responses** | No | No |
@@ -293,7 +249,7 @@ Pre-commit hook scans for secrets and blocks if found.
 
 **[getorigin.io](https://getorigin.io)** — centralized dashboard, policy enforcement, PR compliance. Free trial.
 
-Connected mode adds: real-time dashboard, model/cost policies, PR blocking (`[AI 73%]` annotations on GitHub PRs), compliance reports, team leaderboards, Slack notifications, and GitHub App integration.
+Connected mode adds: real-time dashboard, budget controls with ROI calculator, weekly digest emails, model/cost policies, PR blocking, compliance reports, IAM with per-user API keys, team leaderboards, Slack notifications, and GitHub App integration.
 
 ```bash
 origin login    # Authenticate with your Origin instance
