@@ -85,6 +85,8 @@ program.command('disable')
 program.command('link [slug]')
   .description('Link this repo to an Origin agent (set .origin.json)')
   .option('--clear', 'Remove agent mapping')
+  .option('--list', 'Show current link')
+  .option('--unlink', 'Remove link')
   .action(linkCommand);
 program.command('status').description('Show current status (active session, branch, repo info)').action(statusCommand);
 program.command('whoami').description('Show current user and org info').action(whoamiCommand);

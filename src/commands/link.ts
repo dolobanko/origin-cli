@@ -3,7 +3,7 @@ import { loadConfig, loadRepoConfig, saveRepoConfig, clearRepoConfig } from '../
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 
-export async function linkCommand(slug?: string, opts?: { clear?: boolean }): Promise<void> {
+export async function linkCommand(slug?: string, opts?: { clear?: boolean; list?: boolean; unlink?: boolean }): Promise<void> {
   const config = loadConfig();
   if (!config) {
     console.log(chalk.red('Not logged in. Run: origin login'));
@@ -16,15 +16,15 @@ export async function linkCommand(slug?: string, opts?: { clear?: boolean }): Pr
     process.exit(1);
   }
 
-  // Clear mode
-  if (opts?.clear) {
+  // Clear / unlink mode
+  if (opts?.clear || opts?.unlink) {
     clearRepoConfig(gitRoot);
     console.log(chalk.green('\n  ✓ Agent mapping removed (.origin.json deleted)\n'));
     return;
   }
 
-  // Show current mapping
-  if (!slug) {
+  // Show current mapping (--list or no slug)
+  if (opts?.list || !slug) {
     const repoConfig = loadRepoConfig(gitRoot);
     if (repoConfig?.agent) {
       console.log(chalk.bold('\n🔗 Current agent mapping:\n'));
