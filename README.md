@@ -289,6 +289,7 @@ origin config list              List all config values
 | `secretRedaction` | boolean | | Redact secrets before API send |
 | `hookChaining` | boolean | | Chain existing hooks |
 | `checkpointRepo` | string | | External git remote for session data |
+| `mode` | enum | `auto`, `standalone` | Force standalone mode (skip API even when logged in) |
 
 </details>
 
