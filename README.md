@@ -256,7 +256,8 @@ origin disable                  Remove hooks
   -g, --global                    Remove global hooks
 
 origin link [slug]              Link repo to agent (.origin.json)
-  --clear                         Remove mapping
+  --list                          Show current link
+  --unlink                        Remove link
 
 origin status                   Show system status
 origin whoami                   Show user/org info
