@@ -38,16 +38,16 @@ That's it. Everything stored locally in git notes and the `origin-sessions` bran
 ## Top Commands
 
 ```bash
-origin blame <file>              # Line-by-line AI/human attribution
-origin diff [range]              # Annotated diff — see AI changes in context
-origin stats                     # AI vs human breakdown for the repo
+origin blame <file>              # Who wrote each line — AI agent, model, prompt
+origin prompts <file>            # Show every AI prompt that touched a file
+origin diff [range]              # Annotated diff with [AI]/[Human] tags
 origin sessions                  # List all AI coding sessions
-origin explain [id]              # Full session breakdown: prompts, cost, files
+origin explain [id]              # Full session replay: prompts, cost, files
 origin search "auth bug"         # Find the prompt that introduced code
+origin rework                    # Which AI code got rewritten within a week
+origin rewind                    # Time-travel through AI session checkpoints
+origin stats                     # AI vs human breakdown for the repo
 origin backfill                  # Retroactively tag old commits as AI/human
-origin rework                    # Detect AI code that got reworked by humans
-origin report                    # Sprint report — cost, models, ROI
-origin audit                     # Compliance audit trail (SOC 2 / ISO 27001)
 ```
 
 ---
