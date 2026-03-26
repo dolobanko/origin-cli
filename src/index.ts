@@ -411,6 +411,7 @@ sessions
   .option('-m, --model <model>', 'Filter by model')
   .option('-l, --limit <n>', 'Max results', '20')
   .option('-a, --all', 'Show sessions from all repos (default: current repo only)')
+  .option('-g, --global', 'Alias for --all')
   .action(sessionsCommand);
 
 program.command('session <id>').description('View session detail').action(sessionDetailCommand);
