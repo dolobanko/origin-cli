@@ -60,8 +60,8 @@ origin audit                     # Compliance audit trail (SOC 2 / ISO 27001)
 | <img src="https://cdn.simpleicons.org/cursor/00A4EF" width="14"> **Cursor** | Session hooks + Cursor DB | **Supported** |
 | <img src="https://cdn.simpleicons.org/openai/412991" width="14"> **Codex CLI** | Session hooks + process detection | **Supported** |
 | <img src="https://cdn.simpleicons.org/google/4285F4" width="14"> **Gemini CLI** | Session hooks + process detection | **Supported** |
-| Windsurf | Session hooks | **Supported** |
-| Aider | Config hooks | **Supported** |
+| Windsurf | Session hooks | Coming soon |
+| Aider | Config hooks | Coming soon |
 
 ---
 
