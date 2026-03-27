@@ -509,7 +509,7 @@ AI Agent commits code -> Post-commit hook fires -> Origin detects AI process
 | Line-level attribution | **Yes** -- per-line AI/human tags | Commit-level only | No |
 | Retroactive tagging | **Yes** -- `origin backfill` | No | No |
 | Local-first / no server | **Yes** -- git notes, zero setup | Yes | No -- SaaS only |
-| Multi-agent support | **6 agents** | Claude only | GitHub Copilot only |
+| Multi-agent support | **4 agents** (Claude, Cursor, Gemini, Codex) | Claude only | GitHub Copilot only |
 | Session transcripts | **Full prompts + responses** | No | No |
 | Per-file context injection | **Yes** -- agents see authorship | No | No |
 | Secret scanning | **Built-in** pre-commit hook | No | No |
