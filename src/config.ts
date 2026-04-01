@@ -23,6 +23,7 @@ export interface OriginConfig {
   mode?: 'standalone' | 'auto'; // Force standalone even when logged in
   checkpointRepo?: string; // External git remote URL for origin-sessions branch
   autoSnapshot?: boolean;  // Auto-save snapshots before agent file edits (default: false)
+  agentSlugs?: Record<string, string>; // Per-tool agent slug overrides (e.g. { cursor: 'cursor-frontend' })
 }
 
 export interface AgentConfig {

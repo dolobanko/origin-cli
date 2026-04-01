@@ -326,7 +326,7 @@ export function pushSessionBranch(repoPath: string): void {
       // Push to external checkpoint repo
       execSync(`git push ${checkpointRepo} ${BRANCH} --no-verify --quiet`, execOpts);
     } else {
-      // Push to same repo's origin remote (standalone mode only)
+      // Push to same repo's origin remote
       try {
         execSync('git remote get-url origin', execOpts);
       } catch {

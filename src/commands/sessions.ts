@@ -2,7 +2,7 @@ import chalk from 'chalk';
 import { execSync } from 'child_process';
 import { isConnectedMode } from '../config.js';
 import { api } from '../api.js';
-import { getGitRoot, listActiveSessions, listAllActiveSessions } from '../session-state.js';
+import { getGitRoot, listActiveSessions, listAllActiveSessions, clearSessionState, stopHeartbeat } from '../session-state.js';
 
 interface LocalSession {
   sessionId: string;
@@ -174,11 +174,31 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     }
   }
 
-  // Merge: local sessions first, then platform sessions not already in local
+  // Merge: local sessions first, then platform sessions not already in local.
+  // Platform status overrides local status (local git branch metadata is stale).
+  const platformStatusMap = new Map<string, string>();
+  for (const s of platformSessions) {
+    platformStatusMap.set(s.id.slice(0, 8), s.status || '');
+  }
+
   const localIds = new Set(localSessions.map(s => s.sessionId.slice(0, 8)));
   const merged: Array<{ type: 'local'; data: LocalSession } | { type: 'platform'; data: any }> = [];
 
   for (const s of localSessions) {
+    // Override local status with platform status (platform is source of truth)
+    const platformStatus = platformStatusMap.get(s.sessionId.slice(0, 8));
+    if (platformStatus && platformStatus !== 'RUNNING' && s.status?.toLowerCase() === 'running') {
+      s.status = platformStatus;
+    }
+    // If still RUNNING and connected, do a direct lookup (repo filter may have excluded it)
+    if (s.status?.toLowerCase() === 'running' && isConnectedMode()) {
+      try {
+        const detail = await api.getSession(s.sessionId.slice(0, 8)) as any;
+        if (detail && detail.status && detail.status !== 'RUNNING') {
+          s.status = detail.status;
+        }
+      } catch { /* session not found on platform — keep local status */ }
+    }
     merged.push({ type: 'local', data: s });
   }
   for (const s of platformSessions) {
@@ -379,17 +399,208 @@ export async function sessionDetailCommand(id: string) {
 }
 
 export async function sessionEndCommand(id: string) {
+  const fs = await import('fs');
+  const path = await import('path');
+  const os = await import('os');
+
+  // 1. Kill heartbeat FIRST — before ending on platform, so it can't re-ping
+  try {
+    const hbDir = path.join(os.homedir(), '.origin', 'heartbeats');
+    if (fs.existsSync(hbDir)) {
+      const pidFiles = fs.readdirSync(hbDir).filter(f => f.endsWith('.pid'));
+      for (const pf of pidFiles) {
+        const sessionId = pf.replace('.pid', '');
+        if (sessionId === id || sessionId.startsWith(id) || id.startsWith(sessionId.slice(0, 8))) {
+          const pidPath = path.join(hbDir, pf);
+          try {
+            const pid = parseInt(fs.readFileSync(pidPath, 'utf-8').trim(), 10);
+            if (pid > 0) {
+              try { process.kill(pid, 'SIGTERM'); } catch { /* already dead */ }
+              console.log(chalk.gray(`  Killed heartbeat (pid ${pid}).`));
+            }
+          } catch { /* ignore */ }
+          try { fs.unlinkSync(pidPath); } catch { /* ignore */ }
+        }
+      }
+    }
+  } catch { /* ignore */ }
+
+  // 2. End on platform (if connected)
+  if (isConnectedMode()) {
+    try {
+      await api.endSessionById(id);
+      console.log(chalk.green(`Session ${id} ended on platform.`));
+    } catch (err: any) {
+      console.log(chalk.yellow(`Platform: ${err.message || 'failed to end'}`));
+    }
+  }
+
+  // 3. Clean local state files and global archive
+  let localCleaned = false;
+  try {
+    // Clean active state files (in .git/ dirs)
+    const allSessions = listAllActiveSessions();
+    for (const s of allSessions) {
+      if (s.sessionId === id || s.sessionId.startsWith(id) || id.startsWith(s.sessionId.slice(0, 8))) {
+        stopHeartbeat(s.sessionId); // double-check
+        if (s.sessionTag) {
+          clearSessionState(s.repoPath || undefined, s.sessionTag);
+        }
+        localCleaned = true;
+        break;
+      }
+    }
+  } catch { /* ignore */ }
+
+  // Clean global archive (~/.origin/sessions/)
+  try {
+    const sessionsDir = path.join(os.homedir(), '.origin', 'sessions');
+    if (fs.existsSync(sessionsDir)) {
+      const entries = fs.readdirSync(sessionsDir).filter(f => f.endsWith('.json'));
+      for (const entry of entries) {
+        const filePath = path.join(sessionsDir, entry);
+        try {
+          const raw = fs.readFileSync(filePath, 'utf-8');
+          const state = JSON.parse(raw);
+          if (state.sessionId === id || state.sessionId?.startsWith(id) || id.startsWith(state.sessionId?.slice(0, 8) || '')) {
+            state.status = 'ENDED';
+            state.endedAt = new Date().toISOString();
+            fs.writeFileSync(filePath, JSON.stringify(state), { mode: 0o600 });
+            localCleaned = true;
+          }
+        } catch { /* ignore corrupt file */ }
+      }
+    }
+  } catch { /* ignore */ }
+
+  if (localCleaned) {
+    console.log(chalk.green(`  Local state cleaned.`));
+  }
+
+  // 4. Update origin-sessions git branch — mark as ended
+  try {
+    const repoPath = getGitRoot();
+    if (repoPath) {
+      const execOpts = { encoding: 'utf-8' as const, cwd: repoPath, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'] };
+      const BRANCH = 'origin-sessions';
+      // Check if branch exists
+      execSync(`git rev-parse refs/heads/${BRANCH}`, execOpts);
+      const tree = execSync(`git ls-tree --name-only refs/heads/${BRANCH} sessions/`, execOpts).trim();
+      const sessionDirs = tree ? tree.split('\n').filter(Boolean) : [];
+
+      for (const dir of sessionDirs) {
+        const safeId = dir.replace('sessions/', '');
+        if (safeId === id || safeId.startsWith(id) || id.startsWith(safeId.slice(0, 8))) {
+          try {
+            const metaRaw = execSync(`git show refs/heads/${BRANCH}:${dir}/metadata.json`, execOpts).trim();
+            const metadata = JSON.parse(metaRaw);
+            if (metadata.status === 'running') {
+              // Use writeSessionFiles to update the branch
+              const { writeSessionFiles } = await import('../local-entrypoint.js');
+              writeSessionFiles(repoPath, {
+                sessionId: metadata.sessionId,
+                model: metadata.model,
+                startedAt: metadata.startedAt,
+                endedAt: new Date().toISOString(),
+                durationMs: Date.now() - new Date(metadata.startedAt).getTime(),
+                status: 'ended',
+                costUsd: metadata.cost?.usd || 0,
+                tokensUsed: metadata.tokens?.total || 0,
+                inputTokens: metadata.tokens?.input || 0,
+                outputTokens: metadata.tokens?.output || 0,
+                toolCalls: metadata.toolCalls || 0,
+                linesAdded: metadata.lines?.added || 0,
+                linesRemoved: metadata.lines?.removed || 0,
+                prompts: metadata.prompts || [],
+                filesChanged: metadata.filesChanged || [],
+                git: metadata.git || { branch: '', headBefore: '', headAfter: '', commitShas: [] },
+                summary: metadata.summary || '',
+                originUrl: metadata.originUrl || '',
+                changes: [],
+              });
+              console.log(chalk.green(`  Updated origin-sessions branch.`));
+            }
+          } catch { /* skip */ }
+          break;
+        }
+      }
+    }
+  } catch { /* origin-sessions branch doesn't exist or not in git repo */ }
+}
+
+/**
+ * `origin sessions clean` — End all stale RUNNING sessions.
+ * Optionally filter by --repo or --all.
+ */
+export async function sessionCleanCommand(opts: { all?: boolean }) {
   if (!isConnectedMode()) {
-    console.error(chalk.red('Error: End session requires connected mode. Run: origin login'));
+    console.error(chalk.red('Error: Requires connected mode. Run: origin login'));
     return;
   }
 
   try {
-    await api.endSessionById(id);
-    console.log(chalk.green(`Session ${id} ended successfully.`));
+    // Fetch all sessions, find RUNNING ones
+    const repoPath = getGitRoot();
+    const result = await api.getSessions({ status: 'RUNNING' });
+    const sessions = result?.sessions || [];
+
+    if (!sessions || sessions.length === 0) {
+      // No platform sessions — but still clean local state files below
+    }
+
+    // Filter to current repo unless --all
+    let toEnd = sessions;
+    if (!opts.all && repoPath) {
+      const repoUrl = (() => {
+        try {
+          return execSync('git remote get-url origin', {
+            encoding: 'utf-8',
+            cwd: repoPath,
+            stdio: ['pipe', 'pipe', 'pipe'],
+          }).trim();
+        } catch { return ''; }
+      })();
+      if (repoUrl) {
+        toEnd = sessions.filter((s: any) => s.repoUrl === repoUrl);
+      }
+    }
+
+    if (toEnd.length > 0) {
+      console.log(chalk.bold(`\nEnding ${toEnd.length} running session(s)...\n`));
+
+    let ended = 0;
+    for (const s of toEnd) {
+      try {
+        await api.endSessionById(s.id);
+        console.log(chalk.green('  ✓ ') + chalk.gray(s.id.slice(0, 8)) + ' ' + (s.model || 'unknown') + ' ' + chalk.gray(timeAgo(s.startedAt)));
+        ended++;
+      } catch {
+        console.log(chalk.red('  ✗ ') + chalk.gray(s.id.slice(0, 8)) + ' failed to end');
+      }
+    }
+
+    console.log(chalk.green(`\n  Ended ${ended} session(s) on platform.\n`));
+    }
   } catch (err: any) {
     console.error(chalk.red('Error:'), err.message);
   }
+
+  // Also clean up local state files and kill orphaned heartbeats
+  try {
+    const repoPath = getGitRoot();
+    const localSessions = opts.all ? listAllActiveSessions() : (repoPath ? listActiveSessions(repoPath) : []);
+    let localCleaned = 0;
+    for (const s of localSessions) {
+      stopHeartbeat(s.sessionId);
+      if (s.sessionTag) {
+        clearSessionState(s.repoPath || repoPath || undefined, s.sessionTag);
+      }
+      localCleaned++;
+    }
+    if (localCleaned > 0) {
+      console.log(chalk.gray(`  Cleaned ${localCleaned} local state file(s).`));
+    }
+  } catch { /* ignore */ }
 }
 
 function timeAgo(dateStr: string): string {
