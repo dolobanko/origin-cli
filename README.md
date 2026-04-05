@@ -62,12 +62,12 @@ origin backfill                  # Retroactively tag old commits as AI/human
 | <img src="https://cdn.simpleicons.org/openai/412991" width="14"> **Codex CLI** | Session hooks + process detection + npx cache | ✅ Supported |
 | <img src="https://cdn.simpleicons.org/google/4285F4" width="14"> **Gemini CLI** | Session hooks + process detection | ✅ Supported |
 | 🌊 **Windsurf** | Session hooks + CLI detection | ✅ Supported |
-| 🤖 **Aider** | Session hooks + CLI detection | ✅ Supported |
-| <img src="https://cdn.simpleicons.org/github/ffffff" width="14"> **GitHub Copilot** | IDE extension + GH CLI extension + process detection | ✅ Supported |
-| 🧠 **Cody** | IDE extension + CLI detection | ✅ Supported |
-| ▶️ **Continue** | IDE extension detection | ✅ Supported |
-| 💎 **Codeium** | IDE extension detection | ✅ Supported |
-| 🔧 **Cline** | IDE extension detection (Claude Dev) | ✅ Supported |
+| 🤖 **Aider** | Session hooks + CLI detection | 🚧 In Development |
+| <img src="https://cdn.simpleicons.org/github/ffffff" width="14"> **GitHub Copilot** | IDE extension + GH CLI extension + process detection | 🚧 In Development |
+| 🧠 **Cody** | IDE extension + CLI detection | 🚧 In Development |
+| ▶️ **Continue** | IDE extension detection | 🚧 In Development |
+| 💎 **Codeium** | IDE extension detection | 🚧 In Development |
+| 🔧 **Cline** | IDE extension detection (Claude Dev) | 🚧 In Development |
 
 **Detection methods:**
 - CLI availability (`which <tool>`)
@@ -343,7 +343,7 @@ AI Agent commits code → Post-commit hook fires → Origin detects AI process
 | Line-level attribution | **Yes** — per-line AI/human tags | Commit-level only | No |
 | Retroactive tagging | **Yes** — `origin backfill` | No | No |
 | Local-first / no server | **Yes** — git notes, zero setup | Yes | No — SaaS only |
-| Multi-agent support | **11 agents** | Claude only | GitHub Copilot only |
+| Multi-agent support | **5 agents** (6 more in dev) | Claude only | GitHub Copilot only |
 | Session transcripts | **Full prompts + responses** | No | No |
 | Per-file context injection | **Yes** — agents see authorship | No | No |
 | Secret scanning | **Built-in** pre-commit hook | No | No |
