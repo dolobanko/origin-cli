@@ -7,6 +7,32 @@ import { loadConfig, saveConfig, saveRepoConfig, isConnectedMode } from '../conf
 import { api } from '../api.js';
 import { getGitRoot } from '../session-state.js';
 
+// ─── PATH Helper ──────────────────────────────────────────────────────────
+// Claude Code (and other editors) may spawn hooks with a minimal PATH that
+// doesn't include /opt/homebrew/bin or other user-installed binary dirs.
+// Detect the directory containing the `origin` binary and prefix it into
+// hook commands so `node` and `origin` are always found.
+
+function getOriginBinDir(): string {
+  try {
+    const binPath = execSync('which origin', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
+    if (binPath) return path.dirname(binPath);
+  } catch { /* fallback */ }
+  // Common locations
+  for (const dir of ['/opt/homebrew/bin', '/usr/local/bin']) {
+    if (fs.existsSync(path.join(dir, 'origin'))) return dir;
+  }
+  return '';
+}
+
+function originCmd(cmd: string): string {
+  const binDir = getOriginBinDir();
+  if (binDir && binDir !== '/usr/bin' && binDir !== '/bin') {
+    return `PATH=${binDir}:$PATH ${cmd}`;
+  }
+  return cmd;
+}
+
 // ─── Agent Definitions ────────────────────────────────────────────────────
 
 type AgentType = 'claude-code' | 'cursor' | 'gemini' | 'windsurf' | 'codex' | 'aider';
@@ -40,12 +66,12 @@ function installClaudeHooks(gitRoot: string): void {
   if (!settings.hooks) settings.hooks = {};
 
   const hooks: Record<string, any[]> = {
-    SessionStart: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code session-start' }] }],
-    Stop: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code stop' }] }],
-    UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code user-prompt-submit' }] }],
-    SessionEnd: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code session-end' }] }],
-    PreToolUse: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code pre-tool-use' }] }],
-    PostToolUse: [{ hooks: [{ type: 'command', command: 'origin hooks claude-code post-tool-use' }] }],
+    SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-start') }] }],
+    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code stop') }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code user-prompt-submit') }] }],
+    SessionEnd: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code session-end') }] }],
+    PreToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code pre-tool-use') }] }],
+    PostToolUse: [{ hooks: [{ type: 'command', command: originCmd('origin hooks claude-code post-tool-use') }] }],
   };
 
   for (const [eventType, entries] of Object.entries(hooks)) {
@@ -93,10 +119,10 @@ function installCursorHooks(gitRoot: string): void {
   if (!config.hooks) config.hooks = {};
 
   const hooks: Record<string, any[]> = {
-    sessionStart: [{ command: 'origin hooks cursor session-start' }],
-    stop: [{ command: 'origin hooks cursor stop' }],
-    beforeSubmitPrompt: [{ command: 'origin hooks cursor user-prompt-submit' }],
-    sessionEnd: [{ command: 'origin hooks cursor session-end' }],
+    sessionStart: [{ command: originCmd('origin hooks cursor session-start') }],
+    stop: [{ command: originCmd('origin hooks cursor stop') }],
+    beforeSubmitPrompt: [{ command: originCmd('origin hooks cursor user-prompt-submit') }],
+    sessionEnd: [{ command: originCmd('origin hooks cursor session-end') }],
   };
 
   for (const [eventType, entries] of Object.entries(hooks)) {
@@ -133,13 +159,13 @@ function installGeminiHooks(gitRoot: string): void {
   if (!settings.hooks) settings.hooks = {};
 
   const hooks: Record<string, any[]> = {
-    SessionStart: [{ hooks: [{ name: 'origin-session-start', type: 'command', command: 'origin hooks gemini session-start' }] }],
+    SessionStart: [{ hooks: [{ name: 'origin-session-start', type: 'command', command: originCmd('origin hooks gemini session-start') }] }],
     SessionEnd: [
-      { matcher: 'exit', hooks: [{ name: 'origin-session-end', type: 'command', command: 'origin hooks gemini session-end' }] },
-      { matcher: 'logout', hooks: [{ name: 'origin-session-end-logout', type: 'command', command: 'origin hooks gemini session-end' }] },
+      { matcher: 'exit', hooks: [{ name: 'origin-session-end', type: 'command', command: originCmd('origin hooks gemini session-end') }] },
+      { matcher: 'logout', hooks: [{ name: 'origin-session-end-logout', type: 'command', command: originCmd('origin hooks gemini session-end') }] },
     ],
-    BeforeAgent: [{ hooks: [{ name: 'origin-before-agent', type: 'command', command: 'origin hooks gemini user-prompt-submit' }] }],
-    AfterAgent: [{ hooks: [{ name: 'origin-after-agent', type: 'command', command: 'origin hooks gemini stop' }] }],
+    BeforeAgent: [{ hooks: [{ name: 'origin-before-agent', type: 'command', command: originCmd('origin hooks gemini user-prompt-submit') }] }],
+    AfterAgent: [{ hooks: [{ name: 'origin-after-agent', type: 'command', command: originCmd('origin hooks gemini stop') }] }],
   };
 
   for (const [eventType, entries] of Object.entries(hooks)) {
@@ -181,10 +207,10 @@ function installWindsurfHooks(gitRoot: string): void {
   if (!config.hooks) config.hooks = {};
 
   const hooks: Record<string, any[]> = {
-    sessionStart: [{ command: 'origin hooks windsurf session-start' }],
-    stop: [{ command: 'origin hooks windsurf stop' }],
-    beforeSubmitPrompt: [{ command: 'origin hooks windsurf user-prompt-submit' }],
-    sessionEnd: [{ command: 'origin hooks windsurf session-end' }],
+    sessionStart: [{ command: originCmd('origin hooks windsurf session-start') }],
+    stop: [{ command: originCmd('origin hooks windsurf stop') }],
+    beforeSubmitPrompt: [{ command: originCmd('origin hooks windsurf user-prompt-submit') }],
+    sessionEnd: [{ command: originCmd('origin hooks windsurf session-end') }],
   };
 
   for (const [eventType, entries] of Object.entries(hooks)) {
@@ -220,9 +246,9 @@ function installCodexHooks(gitRoot: string): void {
 
   // Codex supports: SessionStart, Stop, UserPromptSubmit (no SessionEnd/BeforeAgent/AfterAgent)
   const hooks: Record<string, any[]> = {
-    SessionStart: [{ hooks: [{ type: 'command', command: 'origin hooks codex session-start', timeout: 10 }] }],
-    UserPromptSubmit: [{ hooks: [{ type: 'command', command: 'origin hooks codex user-prompt-submit', timeout: 10 }] }],
-    Stop: [{ hooks: [{ type: 'command', command: 'origin hooks codex stop', timeout: 10 }] }],
+    SessionStart: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex session-start'), timeout: 10 }] }],
+    UserPromptSubmit: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex user-prompt-submit'), timeout: 10 }] }],
+    Stop: [{ hooks: [{ type: 'command', command: originCmd('origin hooks codex stop'), timeout: 10 }] }],
   };
 
   for (const [eventType, entries] of Object.entries(hooks)) {
@@ -290,7 +316,7 @@ function installAiderHooks(gitRoot: string): void {
     '# Enable git commit verification so Origin post-commit hook runs',
     'git-commit-verify: true',
     '# Notify Origin when LLM responses complete',
-    'notifications-command: origin hooks aider stop',
+    `notifications-command: ${originCmd('origin hooks aider stop')}`,
     '',
   ].join('\n');
 
@@ -764,7 +790,7 @@ function installGitPreCommitHook(gitRoot: string): void {
   }
 
   const ORIGIN_MARKER = '# origin-pre-commit';
-  const hookScript = `origin hooks git-pre-commit`;
+  const hookScript = originCmd(`origin hooks git-pre-commit`);
 
   if (fs.existsSync(hookPath)) {
     const existing = fs.readFileSync(hookPath, 'utf-8');
@@ -797,7 +823,7 @@ function installGitPostCommitHook(gitRoot: string): void {
   }
 
   const ORIGIN_MARKER = '# origin-post-commit';
-  const hookScript = `origin hooks git-post-commit`;
+  const hookScript = originCmd(`origin hooks git-post-commit`);
 
   // Check if hook file already exists
   if (fs.existsSync(hookPath)) {
@@ -832,7 +858,7 @@ function installGitPrePushHook(gitRoot: string): void {
   }
 
   const ORIGIN_MARKER = '# origin-pre-push';
-  const hookScript = `origin hooks git-pre-push`;
+  const hookScript = originCmd(`origin hooks git-pre-push`);
 
   // Check if hook file already exists
   if (fs.existsSync(hookPath)) {

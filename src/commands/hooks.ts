@@ -13,6 +13,7 @@ import {
   getGitDir,
   getGitRoot,
   discoverGitRoot,
+  discoverAllGitRoots,
   getHeadSha,
   getBranch,
   startHeartbeat,
@@ -603,15 +604,29 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   }
   debugLog('session-start', 'cwd resolved', { hookCwd, inputCwd: input.cwd, workspaceRoots: input.workspace_roots, processCwd: process.cwd() });
 
-  // Only track sessions in git repos — no repo means no code to govern
   // Use discoverGitRoot to handle cases where cwd is a parent of the actual repo
   // (e.g. Claude Code reports /project but the repo is /project/.openclaw/workspace/repo)
-  const repoPath = discoverGitRoot(hookCwd);
-  if (!repoPath) {
+  const discoveredRoot = discoverGitRoot(hookCwd);
+  if (!discoveredRoot) {
     debugLog('session-start', 'SKIP: not a git repo (even after discovery)', { hookCwd });
     return;
   }
-  debugLog('session-start', 'repo path resolved', { repoPath, hookCwd, discovered: repoPath !== getGitRoot(hookCwd) });
+  let repoPath: string = discoveredRoot;
+  let allRepoPaths: string[] | undefined;
+  // Multi-repo support: if cwd itself is NOT a git repo but discoverGitRoot found one
+  // in a subdirectory, check if there are MULTIPLE git repos under cwd.
+  // Use the parent directory as the "primary" repoPath so the API creates a workspace-level
+  // repo (e.g. "origin") rather than a child repo (e.g. "origin-cli").
+  const directGitRoot = getGitRoot(hookCwd);
+  if (!directGitRoot) {
+    const discovered = discoverAllGitRoots(hookCwd);
+    if (discovered.length > 1) {
+      allRepoPaths = discovered;
+      repoPath = hookCwd; // use parent dir as primary repo path (workspace-level)
+      debugLog('session-start', 'multi-repo session detected', { repoPaths: discovered, workspacePath: hookCwd });
+    }
+  }
+  debugLog('session-start', 'repo path resolved', { repoPath, hookCwd, discovered: repoPath !== getGitRoot(hookCwd), multiRepo: !!allRepoPaths });
 
   // Resolve agent slug: .origin.json → agentSlugs override → hook command slug → saved default → undefined
   const repoConfig = loadRepoConfig(repoPath);
@@ -1004,7 +1019,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     if (connected) {
       // ── Connected mode: register session with Origin platform ──
       try {
-        debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, repoUrl, agentSlug: finalAgentSlug, branch });
+        debugLog('session-start', 'calling api.startSession', { machineId: agentConfig.machineId, model, repoPath, repoUrl, agentSlug: finalAgentSlug, branch, multiRepo: !!allRepoPaths });
         const result = await api.startSession({
           machineId: agentConfig.machineId,
           prompt: '',
@@ -1014,6 +1029,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           agentSlug: finalAgentSlug,
           branch: branch || undefined,
           hostname: agentConfig.hostname || undefined,
+          additionalRepoPaths: allRepoPaths ? allRepoPaths.filter(p => p !== repoPath) : undefined,
         });
         sessionId = result.sessionId;
         agentSystemPrompt = result.agentSystemPrompt || undefined;
@@ -1044,10 +1060,10 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       startedAt: apiStartedAt || new Date().toISOString(),
       prompts: [],
       repoPath,
-      headShaAtStart: getHeadSha(hookCwd),
+      headShaAtStart: getHeadSha(repoPath),
       headShaAtLastStop: null,
-      prePromptSha: getHeadSha(hookCwd),
-      prePromptDirtyFiles: getDirtyFiles(hookCwd),
+      prePromptSha: getHeadSha(repoPath),
+      prePromptDirtyFiles: getDirtyFiles(repoPath),
       branch,
       sessionTag,
       agentSystemPrompt,
@@ -1055,8 +1071,31 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       enforcementRules,
     };
 
+    // Multi-repo: store all repo paths and per-repo git state
+    if (allRepoPaths && allRepoPaths.length > 1) {
+      state.repoPaths = allRepoPaths;
+      state.perRepoState = {};
+      for (const rp of allRepoPaths) {
+        state.perRepoState[rp] = {
+          headShaAtStart: getHeadSha(rp),
+          headShaAtLastStop: null,
+          prePromptSha: getHeadSha(rp),
+          prePromptDirtyFiles: getDirtyFiles(rp),
+          branch: getBranch(rp),
+        };
+      }
+      debugLog('session-start', 'multi-repo state initialized', {
+        repoPaths: allRepoPaths,
+        perRepoState: Object.fromEntries(
+          Object.entries(state.perRepoState).map(([k, v]) => [path.basename(k), { head: v.headShaAtStart?.slice(0, 8), branch: v.branch }])
+        ),
+      });
+    }
+
     // Save to tagged file — each concurrent session gets its own state file
-    saveSessionState(state, repoPath, sessionTag);
+    // For multi-repo sessions, save to hookCwd (parent dir) since it's not a git repo
+    const saveCwd = allRepoPaths ? hookCwd : repoPath;
+    saveSessionState(state, saveCwd, sessionTag);
     debugLog('session-start', 'state saved', { sessionId, sessionTag });
 
     // Auto-attach session to active trail on the current branch
@@ -1066,7 +1105,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         if (trail && (trail.status === 'active' || trail.status === 'review')) {
           addSessionToTrail(repoPath, trail.id, sessionId);
           state.trailId = trail.id;
-          saveSessionState(state, repoPath, sessionTag);
+          saveSessionState(state, saveCwd, sessionTag);
           debugLog('session-start', 'auto-attached to trail', { trailId: trail.id, trailName: trail.name });
         }
       } catch (trailErr: any) {
@@ -1077,7 +1116,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     // Start background heartbeat daemon (both connected and standalone mode)
     // In standalone: heartbeat detects parent process death + state file staleness → auto-ends session
     {
-      const stateFile = getStatePath(repoPath, sessionTag);
+      const stateFile = getStatePath(saveCwd, sessionTag);
       const hbApiUrl = (connected && config) ? (config.apiUrl || 'https://getorigin.io') : '';
       const hbApiKey = (connected && config) ? config.apiKey : '';
       startHeartbeat(sessionId, hbApiUrl, hbApiKey, stateFile, finalAgentSlug);
@@ -1755,6 +1794,33 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       debugLog('stop', 'using git-captured files (transcript had none)', { count: filesChanged.length });
     }
 
+    // Multi-repo: capture diffs from all repos and prefix file paths with repo dir name
+    if (state.repoPaths && state.repoPaths.length > 1 && state.perRepoState) {
+      const multiRepoFiles = new Set<string>();
+      for (const rp of state.repoPaths) {
+        const rpState = state.perRepoState[rp];
+        if (!rpState) continue;
+        const rpBaseline = rpState.prePromptSha || rpState.headShaAtLastStop || rpState.headShaAtStart;
+        const rpCapture = captureGitState(rp, rpBaseline);
+        const repoDir = path.basename(rp);
+        for (const c of rpCapture.commitDetails) {
+          for (const f of c.filesChanged) multiRepoFiles.add(`${repoDir}/${f}`);
+        }
+        if (rpCapture.uncommittedDiff) {
+          const filteredUncommitted = filterUncommittedDiff(rpCapture.uncommittedDiff, rpState.prePromptDirtyFiles || []);
+          if (filteredUncommitted) {
+            for (const m of filteredUncommitted.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) multiRepoFiles.add(`${repoDir}/${m[1]}`);
+            }
+          }
+        }
+      }
+      if (multiRepoFiles.size > 0) {
+        filesChanged = Array.from(multiRepoFiles);
+        debugLog('stop', 'multi-repo filesChanged', { count: filesChanged.length });
+      }
+    }
+
     // Build prompt→file mappings for the current prompt.
     // Always merge with previously saved mappings so the API's deleteMany+recreate
     // doesn't lose older prompts.
@@ -1803,7 +1869,25 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     // Compute session-level filesChanged from headShaAtStart (accumulated across all prompts)
     // This is separate from per-prompt filesChanged which uses promptBaseline
     let sessionFilesChanged = filesChanged; // default: per-prompt files
-    if (state.headShaAtStart && state.headShaAtStart !== promptBaseline) {
+    if (state.repoPaths && state.repoPaths.length > 1 && state.perRepoState) {
+      // Multi-repo: session-level files from all repos
+      const sessionFilesSet = new Set<string>();
+      for (const rp of state.repoPaths) {
+        const rpState = state.perRepoState[rp];
+        if (!rpState?.headShaAtStart) continue;
+        try {
+          const rpCapture = captureGitState(rp, rpState.headShaAtStart, { committedOnly: true });
+          const repoDir = path.basename(rp);
+          for (const c of rpCapture.commitDetails) {
+            for (const f of c.filesChanged) sessionFilesSet.add(`${repoDir}/${f}`);
+          }
+        } catch { /* skip this repo */ }
+      }
+      if (sessionFilesSet.size > 0) {
+        sessionFilesChanged = Array.from(sessionFilesSet);
+        debugLog('stop', 'multi-repo session-level filesChanged', { count: sessionFilesChanged.length });
+      }
+    } else if (state.headShaAtStart && state.headShaAtStart !== promptBaseline) {
       try {
         const sessionCapture = captureGitState(state.repoPath, state.headShaAtStart, { committedOnly: true });
         const sessionFilesSet = new Set<string>();
@@ -1907,6 +1991,17 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
     state.headShaAtLastStop = gitCapture.headAfter;
     state.prePromptSha = gitCapture.headAfter;
     state.prePromptDirtyFiles = getDirtyFiles(state.repoPath);
+    // Multi-repo: update per-repo baselines
+    if (state.repoPaths && state.repoPaths.length > 1 && state.perRepoState) {
+      for (const rp of state.repoPaths) {
+        const rpState = state.perRepoState[rp];
+        if (!rpState) continue;
+        const rpHead = getHeadSha(rp);
+        rpState.headShaAtLastStop = rpHead;
+        rpState.prePromptSha = rpHead;
+        rpState.prePromptDirtyFiles = getDirtyFiles(rp);
+      }
+    }
     // Save accumulated prompt mappings so next stop can include previous prompts' data
     if (promptMappings.length > 0) {
       state.completedPromptMappings = promptMappings.map(pm => ({
@@ -2059,6 +2154,31 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       }
       filesChanged = Array.from(gitFiles);
       debugLog('session-end', 'using git-captured files (transcript had none)', { count: filesChanged.length });
+    }
+
+    // Multi-repo: capture session-level files from all repos
+    if (state.repoPaths && state.repoPaths.length > 1 && state.perRepoState) {
+      const multiRepoFiles = new Set<string>();
+      for (const rp of state.repoPaths) {
+        const rpState = state.perRepoState[rp];
+        if (!rpState?.headShaAtStart) continue;
+        try {
+          const rpCapture = captureGitState(rp, rpState.headShaAtStart);
+          const repoDir = path.basename(rp);
+          for (const c of rpCapture.commitDetails) {
+            for (const f of c.filesChanged) multiRepoFiles.add(`${repoDir}/${f}`);
+          }
+          if (rpCapture.uncommittedDiff) {
+            for (const m of rpCapture.uncommittedDiff.matchAll(/^diff --git a\/(.*?) b\//gm)) {
+              if (m[1]) multiRepoFiles.add(`${repoDir}/${m[1]}`);
+            }
+          }
+        } catch { /* skip this repo */ }
+      }
+      if (multiRepoFiles.size > 0) {
+        filesChanged = Array.from(multiRepoFiles);
+        debugLog('session-end', 'multi-repo filesChanged', { count: filesChanged.length });
+      }
     }
 
     // Capture diff for the last prompt if prePromptSha exists

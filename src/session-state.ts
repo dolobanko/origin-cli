@@ -52,6 +52,15 @@ export interface SessionState {
   trailId?: string;           // Trail ID if session is linked to an active trail
   status?: string;            // RUNNING | ENDED | COMPLETED
   endedAt?: string;           // ISO timestamp when session ended
+  // Multi-repo support: when cwd contains multiple git repos
+  repoPaths?: string[];       // All git repo roots discovered under cwd
+  perRepoState?: Record<string, {
+    headShaAtStart: string | null;
+    headShaAtLastStop: string | null;
+    prePromptSha: string | null;
+    prePromptDirtyFiles: string[];
+    branch: string | null;
+  }>;
 }
 
 // ─── Git Directory ─────────────────────────────────────────────────────────
@@ -115,6 +124,53 @@ export function discoverGitRoot(cwd?: string): string | null {
   } catch { /* ignore */ }
 
   return null;
+}
+
+/**
+ * Discover ALL git repos under a directory (immediate subdirectories).
+ * Used when the cwd itself is not a git repo but contains multiple repos.
+ */
+export function discoverAllGitRoots(cwd?: string): string[] {
+  const dir = cwd || process.cwd();
+
+  // If the directory itself is a git repo, return just that
+  const direct = getGitRoot(dir);
+  if (direct) return [direct];
+
+  const roots: string[] = [];
+
+  // Check common workspace patterns
+  const workspacePatterns = [
+    path.join(dir, '.openclaw', 'workspace'),
+    path.join(dir, 'workspace'),
+  ];
+  for (const wsDir of workspacePatterns) {
+    try {
+      if (!fs.existsSync(wsDir)) continue;
+      const entries = fs.readdirSync(wsDir, { withFileTypes: true });
+      for (const entry of entries) {
+        if (!entry.isDirectory()) continue;
+        const candidate = path.join(wsDir, entry.name);
+        const found = getGitRoot(candidate);
+        if (found && !roots.includes(found)) roots.push(found);
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Scan immediate subdirectories
+  try {
+    const entries = fs.readdirSync(dir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
+      const candidate = path.join(dir, entry.name);
+      if (fs.existsSync(path.join(candidate, '.git'))) {
+        const found = getGitRoot(candidate);
+        if (found && !roots.includes(found)) roots.push(found);
+      }
+    }
+  } catch { /* ignore */ }
+
+  return roots;
 }
 
 export function getHeadSha(cwd?: string): string | null {
