@@ -607,22 +607,31 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
   // Use discoverGitRoot to handle cases where cwd is a parent of the actual repo
   // (e.g. Claude Code reports /project but the repo is /project/.openclaw/workspace/repo)
   const discoveredRoot = discoverGitRoot(hookCwd);
-  if (!discoveredRoot) {
-    debugLog('session-start', 'SKIP: not a git repo (even after discovery)', { hookCwd });
-    return;
-  }
-  let repoPath: string = discoveredRoot;
+  let repoPath: string = discoveredRoot || hookCwd; // fall back to cwd for non-git projects
   let allRepoPaths: string[] | undefined;
-  // Multi-repo support: if cwd itself is NOT a git repo but discoverGitRoot found one
-  // in a subdirectory, check if there are MULTIPLE git repos under cwd.
-  // Use the parent directory as the "primary" repoPath so the API creates a workspace-level
-  // repo (e.g. "origin") rather than a child repo (e.g. "origin-cli").
-  const directGitRoot = getGitRoot(hookCwd);
-  if (!directGitRoot) {
+  let isNonGitProject = false;
+  if (!discoveredRoot) {
+    // Check for multi-repo workspace (multiple git repos as subdirectories)
     const discovered = discoverAllGitRoots(hookCwd);
     if (discovered.length > 1) {
       allRepoPaths = discovered;
-      repoPath = hookCwd; // use parent dir as primary repo path (workspace-level)
+      repoPath = hookCwd;
+      debugLog('session-start', 'multi-repo session detected', { repoPaths: discovered, workspacePath: hookCwd });
+    } else if (discovered.length === 0) {
+      // Non-git project: track session with basic data (no diffs/branches)
+      isNonGitProject = true;
+      repoPath = hookCwd;
+      debugLog('session-start', 'non-git project, tracking without git data', { hookCwd });
+    }
+  }
+  // Multi-repo support: if cwd itself is NOT a git repo but discoverGitRoot found one
+  // in a subdirectory, check if there are MULTIPLE git repos under cwd.
+  const directGitRoot = getGitRoot(hookCwd);
+  if (discoveredRoot && !directGitRoot) {
+    const discovered = discoverAllGitRoots(hookCwd);
+    if (discovered.length > 1) {
+      allRepoPaths = discovered;
+      repoPath = hookCwd;
       debugLog('session-start', 'multi-repo session detected', { repoPaths: discovered, workspacePath: hookCwd });
     }
   }
