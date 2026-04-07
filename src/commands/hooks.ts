@@ -1420,9 +1420,14 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
   }
 
   const rawPrompt = input.prompt || '';
-  // Filter out system/hook messages that aren't real user prompts
+  // Filter out system/hook messages and internal agent tags that aren't real user prompts
   const prompt = rawPrompt
     .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    .replace(/<task-notification>[\s\S]*?<\/task-notification>/g, '')
+    .replace(/<task-id>[\s\S]*?<\/task-id>/g, '')
+    .replace(/<tool-use-id>[\s\S]*?<\/tool-use-id>/g, '')
+    .replace(/<output-file>[\s\S]*?<\/output-file>/g, '')
+    .replace(/<command-name>[\s\S]*?<\/command-name>/g, '')
     .trim();
   const isSystemMsg = !prompt || /^Stop hook feedback:|^Stop:Callback hook blocking error|^PostToolUse:.*hook|^PreToolUse:.*hook/i.test(prompt);
   if (prompt && !isSystemMsg) {
