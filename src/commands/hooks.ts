@@ -1410,8 +1410,13 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
     return;
   }
 
-  const prompt = input.prompt || '';
-  if (prompt) {
+  const rawPrompt = input.prompt || '';
+  // Filter out system/hook messages that aren't real user prompts
+  const prompt = rawPrompt
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
+    .trim();
+  const isSystemMsg = !prompt || /^Stop hook feedback:|^Stop:Callback hook blocking error|^PostToolUse:.*hook|^PreToolUse:.*hook/i.test(prompt);
+  if (prompt && !isSystemMsg) {
     // ── Per-prompt diff: capture previous prompt's changes before recording new prompt ──
     const repoPath = state.repoPath || hookCwd;
     const currentHead = getHeadSha(repoPath);

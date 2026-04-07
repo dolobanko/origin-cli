@@ -224,9 +224,14 @@ function cleanPrompt(text: string): string | null {
     .replace(/<ide_opened_file>[\s\S]*?<\/ide_opened_file>/g, '')
     .replace(/<ide_selected_text>[\s\S]*?<\/ide_selected_text>/g, '')
     .replace(/<ide_context>[\s\S]*?<\/ide_context>/g, '')
+    // Strip Claude Code system reminders and hook feedback
+    .replace(/<system-reminder>[\s\S]*?<\/system-reminder>/g, '')
     .trim();
 
   if (!cleaned) return null;
+
+  // Skip prompts that are purely hook feedback or system messages
+  if (isSystemMessage(cleaned)) return null;
 
   // Truncate very long prompts
   if (cleaned.length > 1000) {
@@ -234,6 +239,18 @@ function cleanPrompt(text: string): string | null {
   }
 
   return cleaned;
+}
+
+/** Detect prompts that are actually system/hook messages, not real user input */
+function isSystemMessage(text: string): boolean {
+  const systemPatterns = [
+    /^Stop hook feedback:/,
+    /^Stop:Callback hook blocking error/,
+    /^PostToolUse:.*hook/i,
+    /^PreToolUse:.*hook/i,
+    /^\[Image: original \d+x\d+/,
+  ];
+  return systemPatterns.some(p => p.test(text.trim()));
 }
 
 // ─── Gemini Transcript Parser ──────────────────────────────────────────────
