@@ -13,20 +13,49 @@ import { getGitRoot } from '../session-state.js';
 // Detect the directory containing the `origin` binary and prefix it into
 // hook commands so `node` and `origin` are always found.
 
-function getOriginBinDir(): string {
+function getOriginBinPath(): string {
+  // 1. Resolve from the currently running process (most reliable)
+  try {
+    const selfBin = process.argv[1]; // e.g. /Users/x/.nvm/.../bin/origin or /opt/homebrew/bin/origin
+    if (selfBin) {
+      // Follow symlinks to get the real binary location
+      const realSelf = fs.realpathSync(selfBin);
+      const dir = path.dirname(realSelf);
+      // Walk up to find the bin directory (handles node_modules/.bin/ symlinks)
+      for (const candidate of [path.dirname(selfBin), dir]) {
+        if (fs.existsSync(path.join(candidate, 'origin'))) return candidate;
+      }
+    }
+  } catch { /* fallback */ }
+
+  // 2. which origin
   try {
     const binPath = execSync('which origin', { encoding: 'utf-8', stdio: ['pipe', 'pipe', 'pipe'] }).trim();
     if (binPath) return path.dirname(binPath);
   } catch { /* fallback */ }
-  // Common locations
+
+  // 3. Common locations
   for (const dir of ['/opt/homebrew/bin', '/usr/local/bin']) {
     if (fs.existsSync(path.join(dir, 'origin'))) return dir;
   }
+
+  // 4. NVM locations (common on macOS)
+  try {
+    const nvmDir = path.join(os.homedir(), '.nvm', 'versions', 'node');
+    if (fs.existsSync(nvmDir)) {
+      const versions = fs.readdirSync(nvmDir).sort().reverse();
+      for (const v of versions) {
+        const binDir = path.join(nvmDir, v, 'bin');
+        if (fs.existsSync(path.join(binDir, 'origin'))) return binDir;
+      }
+    }
+  } catch { /* fallback */ }
+
   return '';
 }
 
 function originCmd(cmd: string): string {
-  const binDir = getOriginBinDir();
+  const binDir = getOriginBinPath();
   if (binDir && binDir !== '/usr/bin' && binDir !== '/bin') {
     return `PATH=${binDir}:$PATH ${cmd}`;
   }
