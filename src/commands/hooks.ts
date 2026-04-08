@@ -1039,6 +1039,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
           branch: branch || undefined,
           hostname: agentConfig.hostname || undefined,
           additionalRepoPaths: allRepoPaths ? allRepoPaths.filter(p => p !== repoPath) : undefined,
+          agentSessionId: claudeSessionId || undefined,
         });
         sessionId = result.sessionId;
         agentSystemPrompt = result.agentSystemPrompt || undefined;

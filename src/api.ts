@@ -46,6 +46,7 @@ export const api = {
     branch?: string;
     hostname?: string;
     additionalRepoPaths?: string[];
+    agentSessionId?: string;
   }) =>
     request('/api/mcp/session/start', { method: 'POST', body: JSON.stringify(data) }),
   updateSession: (id: string, data: any) =>
