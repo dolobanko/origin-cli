@@ -2,17 +2,30 @@ import { createInterface } from 'readline/promises';
 import { saveConfig } from '../config.js';
 import chalk from 'chalk';
 
-export async function loginCommand() {
-  const rl = createInterface({ input: process.stdin, output: process.stdout });
+interface LoginOpts {
+  key?: string;
+  url?: string;
+}
 
+export async function loginCommand(opts: LoginOpts) {
   console.log(chalk.bold('\n🔑 Origin Login\n'));
 
-  const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
-  const apiKey = await rl.question(chalk.gray('API Key: '));
-  rl.close();
+  let url: string;
+  let key: string;
 
-  const url = (apiUrl.trim() || 'https://getorigin.io').replace(/\/+$/, '');
-  const key = apiKey.trim();
+  if (opts.key) {
+    // Non-interactive mode
+    url = (opts.url || 'https://getorigin.io').replace(/\/+$/, '');
+    key = opts.key.trim();
+  } else {
+    // Interactive mode
+    const rl = createInterface({ input: process.stdin, output: process.stdout });
+    const apiUrl = await rl.question(chalk.gray('Origin API URL (default: https://getorigin.io): '));
+    const apiKey = await rl.question(chalk.gray('API Key: '));
+    rl.close();
+    url = (apiUrl.trim() || 'https://getorigin.io').replace(/\/+$/, '');
+    key = apiKey.trim();
+  }
 
   if (!key) {
     console.log(chalk.red('Error: API key is required'));
@@ -20,7 +33,7 @@ export async function loginCommand() {
   }
 
   // Verify connection via whoami endpoint
-  console.log(chalk.gray('\nVerifying connection...'));
+  console.log(chalk.gray('Verifying connection...'));
   try {
     const whoamiUrl = `${url}/api/mcp/whoami`;
     const res = await fetch(whoamiUrl, {
@@ -65,4 +78,6 @@ export async function loginCommand() {
     console.log(chalk.red(`✗ Failed to connect: ${err.message}`));
     process.exit(1);
   }
+
+  process.exit(0);
 }

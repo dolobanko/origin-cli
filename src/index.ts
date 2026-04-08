@@ -70,7 +70,11 @@ program
 
 // ─── Setup ────────────────────────────────────────────────────────────────
 
-program.command('login').description('Login to Origin').action(loginCommand);
+program.command('login')
+  .description('Login to Origin')
+  .option('--key <apiKey>', 'API key (skip interactive prompt)')
+  .option('--url <apiUrl>', 'API URL (default: https://getorigin.io)')
+  .action(loginCommand);
 program.command('init')
   .description('Register this machine as an agent host')
   .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
