@@ -1,7 +1,7 @@
 {
   "origin": {
     "version": 1,
-    "sessionId": "detected-claude-mnqt7ekp",
+    "sessionId": "detected-claude-mnqt7ef2",
     "model": "claude",
     "promptCount": 0,
     "promptSummary": "",
@@ -10,7 +10,7 @@
     "durationMs": 0,
     "linesAdded": 3,
     "linesRemoved": 1,
-    "originUrl": "https://getorigin.io/sessions/detected-claude-mnqt7ekp",
-    "timestamp": "2026-04-09T01:39:38.768Z"
+    "originUrl": "https://getorigin.io/sessions/detected-claude-mnqt7ef2",
+    "timestamp": "2026-04-09T01:39:38.792Z"
   }
 }
