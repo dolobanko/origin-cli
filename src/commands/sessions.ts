@@ -261,17 +261,11 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
       if (s.status === 'RUNNING') {
         status = 'RUNNING';
         statusColor = chalk.green;
-      } else if (s.review?.status === 'APPROVED') {
-        status = 'APPROVED';
-        statusColor = chalk.green;
-      } else if (s.review?.status === 'REJECTED') {
-        status = 'REJECTED';
-        statusColor = chalk.red;
-      } else if (s.review?.status === 'FLAGGED') {
-        status = 'FLAGGED';
+      } else if (s.status === 'IDLE') {
+        status = 'IDLE';
         statusColor = chalk.yellow;
       } else {
-        status = 'UNREVIEWED';
+        status = 'ENDED';
         statusColor = chalk.gray;
       }
 
