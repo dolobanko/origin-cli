@@ -81,9 +81,10 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
   const repoPath = getGitRoot(process.cwd());
   const limit = parseInt(opts.limit || '20', 10);
 
-  // Always read local sessions from origin-sessions git branch
+  // Read local sessions — skip when connected to platform (platform is source of truth)
   let localSessions: LocalSession[] = [];
-  if (repoPath) {
+  const connected = isConnectedMode();
+  if (repoPath && !connected) {
     localSessions = listLocalSessions(repoPath);
 
     // Also include active sessions from state files for current repo
@@ -123,8 +124,8 @@ export async function sessionsCommand(opts: { status?: string; model?: string; l
     }
   }
 
-  // For --all/--global: scan ALL repos' state files from ~/.origin/sessions/
-  if (opts.all) {
+  // For --all/--global: scan ALL repos' state files (only in disconnected/local mode)
+  if (opts.all && !connected) {
     try {
       const allStates = listAllActiveSessions();
       const existingIds = new Set(localSessions.map(s => s.sessionId));
