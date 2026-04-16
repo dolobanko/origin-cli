@@ -3083,7 +3083,26 @@ export async function handlePostCommit(): Promise<void> {
       const fullMessage = execFileSync('git', ['log', '-1', '--format=%B'], execOpts).trim();
       if (!fullMessage.includes('Origin-Session:')) {
         const shortId = state.sessionId.slice(0, 12);
-        const trailer = `Origin-Session: ${shortId}`;
+        // Build rich trailer: Origin-Session: abc123 | Claude Code | $0.12 | 3 prompts
+        const trailerParts = [shortId];
+        // Agent name
+        const m = (state.model || '').toLowerCase();
+        const agentName = m.includes('claude') || m.includes('sonnet') || m.includes('opus') ? 'Claude Code'
+          : m.includes('gpt') || m.includes('o1-') || m.includes('o3-') || m.includes('o4-') ? 'Cursor'
+          : m.includes('gemini') ? 'Gemini CLI'
+          : m.includes('codex') ? 'Codex'
+          : m.includes('windsurf') ? 'Windsurf'
+          : m.includes('aider') ? 'Aider'
+          : m.includes('copilot') ? 'Copilot'
+          : m.includes('amp') ? 'Amp'
+          : m.includes('junie') ? 'Junie'
+          : m.includes('opencode') ? 'Opencode'
+          : state.model || 'AI';
+        trailerParts.push(agentName);
+        // Prompt count
+        const pCount = state.prompts?.length || 0;
+        if (pCount > 0) trailerParts.push(pCount === 1 ? '1 prompt' : `${pCount} prompts`);
+        const trailer = `Origin-Session: ${trailerParts.join(' | ')}`;
         // Amend the commit message to add the trailer
         const newMessage = fullMessage + '\n\n' + trailer;
         execFileSync('git', ['commit', '--amend', '-m', newMessage, '--no-verify'], execOpts);

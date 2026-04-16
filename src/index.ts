@@ -53,6 +53,8 @@ import { exportCommand } from './commands/export.js';
 import { compareCommand } from './commands/compare.js';
 import { reworkCommand } from './commands/rework.js';
 import { reportCommand } from './commands/report.js';
+import { logCommand } from './commands/log.js';
+import { showCommand } from './commands/show.js';
 import { attachCommand } from './commands/attach.js';
 import { backfillCommand } from './commands/backfill.js';
 import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
@@ -363,6 +365,17 @@ program.command('recap')
   .description('End-of-day summary: sessions, cost, tokens, files, commits, TODOs, top model')
   .option('-d, --days <n>', 'Number of days to include (default: 1 = today only)', '1')
   .action(recapCommand);
+
+program.command('log')
+  .description('Show git log with Origin session info inline (agent, cost, prompts)')
+  .option('-l, --limit <n>', 'Max commits to show', '20')
+  .option('-a, --all', 'Show all branches')
+  .action(logCommand);
+
+program.command('show <commit>')
+  .description('Show the Origin session linked to a commit')
+  .option('--json', 'Output as JSON')
+  .action(showCommand);
 
 program.command('report')
   .description('Generate a markdown sprint report summarizing AI activity')
