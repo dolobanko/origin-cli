@@ -423,16 +423,58 @@ export function listAllActiveSessions(): SessionState[] {
 
 /**
  * Find a session by its Claude session ID.
- * Useful for concurrent sessions where multiple origin-session files exist.
+ *
+ * Searches both the local repo's state files and the global mirror
+ * (`~/.origin/sessions/`), which catches multi-repo workspaces where a nested
+ * `.git/` dir belonged to a different hookCwd than session-start saw. Stale
+ * `.git/origin-session-*.json` files whose mtime is older than FRESH_MS are
+ * skipped so a previous day's crashed session can't hijack a resumed Claude
+ * session that reuses the same claudeSessionId.
  */
 export function findSessionByClaudeId(claudeSessionId: string, cwd?: string): SessionState | null {
-  // Try the default (untagged) session first
-  const defaultState = loadSessionState(cwd);
-  if (defaultState?.claudeSessionId === claudeSessionId) return defaultState;
+  const FRESH_MS = 3 * 60 * 60 * 1000; // 3 hours — matches listAllActiveSessions staleness
+  const candidates: Array<{ state: SessionState; mtime: number }> = [];
 
-  // Search all active sessions
-  const sessions = listActiveSessions(cwd);
-  return sessions.find(s => s.claudeSessionId === claudeSessionId) || null;
+  const pushIfFresh = (filePath: string, state: unknown) => {
+    const s = state as SessionState | null;
+    if (!s || s.claudeSessionId !== claudeSessionId) return;
+    if (s.status === 'ENDED') return;
+    let mtime = 0;
+    try { mtime = fs.statSync(filePath).mtimeMs; } catch { /* ignore */ }
+    if (mtime && Date.now() - mtime > FRESH_MS) return;
+    candidates.push({ state: s, mtime });
+  };
+
+  // Local .git / hashed fallback — both default and tagged files
+  const defaultPath = getStatePath(cwd);
+  try { pushIfFresh(defaultPath, JSON.parse(fs.readFileSync(defaultPath, 'utf-8'))); } catch { /* ignore */ }
+  const gitDir = getGitDir(cwd);
+  if (gitDir) {
+    const resolvedGitDir = path.isAbsolute(gitDir) ? gitDir : path.resolve(cwd || process.cwd(), gitDir);
+    try {
+      for (const entry of fs.readdirSync(resolvedGitDir)) {
+        if (!entry.startsWith('origin-session') || !entry.endsWith('.json')) continue;
+        const p = path.join(resolvedGitDir, entry);
+        try { pushIfFresh(p, JSON.parse(fs.readFileSync(p, 'utf-8'))); } catch { /* skip */ }
+      }
+    } catch { /* ignore */ }
+  }
+
+  // Global mirror — catches nested-repo / multi-repo cases where the active
+  // session was saved under a different cwd's git dir.
+  const globalDir = path.join(os.homedir(), '.origin', 'sessions');
+  try {
+    for (const entry of fs.readdirSync(globalDir)) {
+      if (!entry.endsWith('.json')) continue;
+      const p = path.join(globalDir, entry);
+      try { pushIfFresh(p, JSON.parse(fs.readFileSync(p, 'utf-8'))); } catch { /* skip */ }
+    }
+  } catch { /* ignore */ }
+
+  if (candidates.length === 0) return null;
+  // Prefer the most recently-written candidate — that's the live session.
+  candidates.sort((a, b) => b.mtime - a.mtime);
+  return candidates[0].state;
 }
 
 /**
