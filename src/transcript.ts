@@ -21,6 +21,7 @@ interface MessageUsage {
 interface TranscriptLine {
   type: 'user' | 'assistant';
   uuid?: string;
+  timestamp?: string;
   message: {
     id?: string;
     role?: string;
@@ -67,7 +68,16 @@ const FILE_MODIFICATION_TOOLS = new Set([
 
 // ─── Parser ────────────────────────────────────────────────────────────────
 
-export function parseTranscript(transcriptPath: string): ParsedTranscript {
+export function parseTranscript(transcriptPath: string, opts: { since?: Date | string | null } = {}): ParsedTranscript {
+  // Resumed Claude Code sessions write the full conversation history into the
+  // new transcript file, so summing every line double-counts the parent
+  // session's tokens (we saw cache reads ~200M show up identically on a
+  // chained child, inflating cost by ~2×). When `since` is provided, drop
+  // entries whose `timestamp` predates it so each session reports only the
+  // tokens it actually produced.
+  const sinceMs = opts.since
+    ? (typeof opts.since === 'string' ? new Date(opts.since) : opts.since).getTime()
+    : 0;
   const result: ParsedTranscript = {
     prompts: [],
     filesChanged: [],
@@ -119,6 +129,11 @@ export function parseTranscript(transcriptPath: string): ParsedTranscript {
       entry = JSON.parse(line);
     } catch {
       continue; // skip malformed lines
+    }
+
+    if (sinceMs > 0 && entry.timestamp) {
+      const t = Date.parse(entry.timestamp);
+      if (Number.isFinite(t) && t < sinceMs) continue;
     }
 
     const type = entry.type || entry.message?.role;
@@ -181,7 +196,10 @@ export function parseTranscript(transcriptPath: string): ParsedTranscript {
     result.cacheCreationTokens += usage.cache_creation_input_tokens ?? 0;
     result.outputTokens += usage.output_tokens ?? 0;
   }
-  result.tokensUsed = result.inputTokens + result.cacheReadTokens + result.cacheCreationTokens + result.outputTokens;
+  // `tokensUsed` is the "real" fresh-tokens total. Cache reads/creations are
+  // tracked on their own fields so they can be reported without inflating the
+  // headline number (cache reads are volumetrically huge but charged at 10%).
+  result.tokensUsed = result.inputTokens + result.outputTokens;
 
   // Deduplicated file list, filtered through ignore patterns
   result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));
@@ -337,7 +355,10 @@ function parseGeminiTranscript(raw: string, result: ParsedTranscript): ParsedTra
       }
     }
 
-    result.tokensUsed = result.inputTokens + result.cacheReadTokens + result.outputTokens;
+    // Fresh tokens only. Cache reads are 90% cheaper and volumetrically
+    // huge — rolling them into `tokensUsed` inflated dashboard totals
+    // 10x+ (same bug we fixed for Claude transcripts at line 184).
+    result.tokensUsed = result.inputTokens + result.outputTokens;
     result.filesChanged = Array.from(filesSet).filter(f => !shouldIgnoreFile(f));
     if (!result.model) result.model = data.model || 'gemini';
 
@@ -437,7 +458,16 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
       // If no prompt text (tool_result entry), continue accumulating files in current turn
     }
 
-    if (type === 'assistant' && currentPromptIndex >= 0) {
+    if (type === 'assistant') {
+      // If assistant work appears before we've seen any user prompt (e.g.
+      // transcript starts mid-session with a tool_result), synthesise
+      // prompt-index 0 so file edits don't get discarded under a phantom
+      // -1 bucket. The session/start prompt list still drives the UI
+      // turn labels; this just makes sure files attach SOMEWHERE.
+      if (currentPromptIndex < 0) {
+        currentPromptIndex = 0;
+        currentPromptText = currentPromptText || '';
+      }
       const content = entry.message?.content;
       if (Array.isArray(content)) {
         for (const block of content) {
@@ -463,8 +493,11 @@ export function extractPromptFileMappings(transcriptPath: string): PromptFileMap
     });
   }
 
-  // Filter out prompts with no file changes (unless it's the only prompt)
-  return mappings.filter((m) => m.filesChanged.length > 0);
+  // Don't filter out prompts with zero files — conversational turns are
+  // valid data; the UI can show "No files modified" rather than hiding
+  // the turn entirely. Previously filtering made the UI look empty for
+  // tiny sessions where Claude replied without editing files.
+  return mappings;
 }
 
 /**
@@ -625,7 +658,25 @@ export interface DisplayMessage {
  * Strips tool_use/tool_result blocks, keeps only human-readable text.
  * Returns a JSON string ready to store in the database, or '' if empty.
  */
-export function formatTranscriptForDisplay(transcriptPath: string): string {
+/**
+ * Options for formatting a transcript for dashboard display.
+ *
+ * `verbose` was added by recent hook handlers (call sites in commands/hooks.ts
+ * pass `{ verbose: !!state.verboseCapture }`) but the implementation was never
+ * landed — calls broke the production tsc build because the function only
+ * accepted a single argument. Accept the option here so the build stays green;
+ * actual verbose-mode formatting (richer tool-call detail, raw payloads, etc.)
+ * is a follow-up — see issue tracker.
+ */
+export interface FormatTranscriptOptions {
+  verbose?: boolean;
+}
+
+export function formatTranscriptForDisplay(
+  transcriptPath: string,
+  // eslint-disable-next-line @typescript-eslint/no-unused-vars
+  _options?: FormatTranscriptOptions,
+): string {
   if (!fs.existsSync(transcriptPath)) {
     return '';
   }
@@ -781,15 +832,21 @@ function formatGeminiMessages(raw: string): DisplayMessage[] {
 export type ModelPricing = Record<string, { input: number; output: number }>;
 
 const DEFAULT_MODEL_PRICING: ModelPricing = {
-  // Anthropic (Opus 4.5/4.6, Sonnet 4.x, Haiku 4.5)
-  'sonnet': { input: 3, output: 15 },
-  'opus': { input: 5, output: 25 },
-  'haiku': { input: 1, output: 5 },
-  // Google
+  // Anthropic — verified against https://www.anthropic.com/pricing on 2026-04-24.
+  // Cache reads are billed at 10% of input; cache writes at 125% (handled in
+  // estimateCost below). Per-1M-token rates in USD.
+  // NOTE: keep this table in sync with packages/cli/src/commands/prompt-status.ts
+  // until both are consolidated into a single pricing module.
+  'sonnet': { input: 3,    output: 15 },
+  'opus':   { input: 15,   output: 75 },  // was 5/25 — undercounted Opus cost by 3×
+  'haiku':  { input: 0.80, output: 4  },  // matches Haiku 3.5 / 4 public rates
+  // Google — pricing per 1M tokens (≤200K context tier where two tiers exist)
   'gemini-2.5-pro': { input: 1.25, output: 10 },
-  'gemini-2.5-flash': { input: 0.15, output: 3.50 },
+  'gemini-2.5-flash': { input: 0.30, output: 2.50 },      // was 0.15/3.50 — wrong
+  'gemini-2.5-flash-lite': { input: 0.10, output: 0.40 },
   'gemini-3-pro': { input: 1.25, output: 10 },
   'gemini-3-flash': { input: 0.15, output: 0.60 },
+  'gemini-2.0-flash': { input: 0.10, output: 0.40 },
   'gemini-2.0': { input: 0.10, output: 0.40 },
   // OpenAI (for Cursor users)
   'gpt-4o': { input: 2.50, output: 10 },

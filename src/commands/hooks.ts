@@ -32,11 +32,12 @@ import { buildAttributionContext, buildFileAttributionContext } from '../attribu
 import { writeHandoff, buildHandoffContext, extractTodosFromPrompts } from '../handoff.js';
 import { writeSessionMemory, buildMemoryContext } from '../memory.js';
 import { addTodosFromSession } from '../todo.js';
-import { createCheckpoint, condenseCheckpoint, listCheckpoints, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
+import { createSnapshot, condenseSnapshot, listSnapshots, condenseAndCleanupSession, cleanupSessionShadowBranch, type SnapshotMeta } from './snapshot.js';
 import { execFileSync } from 'child_process';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import * as fzstd from 'fzstd';
 
 // ─── Debug Logger ─────────────────────────────────────────────────────────
 
@@ -215,7 +216,7 @@ function buildSessionWriteData(opts: {
     };
   });
 
-  // Build PromptChange[] from mappings with checkpoint metadata
+  // Build PromptChange[] from mappings with snapshot metadata
   const changes: PromptChange[] = promptMappings.map(m => {
     // Compute per-prompt line counts from diff
     const diffLines = (m.diff || '').split('\n');
@@ -245,6 +246,8 @@ function buildSessionWriteData(opts: {
     tokensUsed: parsed.tokensUsed,
     inputTokens: parsed.inputTokens,
     outputTokens: parsed.outputTokens,
+    cacheReadTokens: parsed.cacheReadTokens,
+    cacheCreationTokens: parsed.cacheCreationTokens,
     toolCalls: parsed.toolCalls,
     linesAdded: gitCapture.linesAdded,
     linesRemoved: gitCapture.linesRemoved,
@@ -411,7 +414,11 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
     tags: [...debugSessions1, ...debugSessions2].map(s => s.sessionTag),
   });
 
-  // 1. If we have a claude session ID, try exact match
+  // 1. If we have a claude session ID, try exact match.
+  // The caller only passes claudeSessionId for agents with STABLE per-conversation
+  // ids (Claude Code, Windsurf). If exact match fails for a stable agent, the
+  // conversation is genuinely new — DO NOT fall through to "most recent active",
+  // which silently merges unrelated Claude Code windows into one platform session.
   if (claudeSessionId) {
     const found = findSessionByClaudeId(claudeSessionId, hookCwd)
       || (repoPath !== hookCwd ? findSessionByClaudeId(claudeSessionId, repoPath) : null);
@@ -419,6 +426,8 @@ function findStateForHook(hookCwd: string, claudeSessionId?: string, agentSlug?:
       debugLog('findStateForHook', 'exact match', { claudeSessionId, sessionId: found.sessionId, tag: found.sessionTag });
       return { state: found, saveCwd: found.repoPath || repoPath };
     }
+    debugLog('findStateForHook', 'no exact match for stable claudeSessionId — new session needed', { claudeSessionId, agentSlug });
+    return null;
   }
 
   // 2. Fall back to active sessions for this repo
@@ -672,6 +681,7 @@ interface CodexSessionData {
   tokensUsed: number;
   inputTokens: number;
   outputTokens: number;
+  toolCalls: number;
   prompt: string;
   transcript?: string;  // full JSONL conversation for display
 }
@@ -742,6 +752,7 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
         tokensUsed: rolloutResult.tokensUsed,
         inputTokens: rolloutResult.inputTokens,
         outputTokens: rolloutResult.outputTokens,
+        toolCalls: rolloutResult.toolCalls,
         prompt,
         transcript: rolloutResult.transcript,
       };
@@ -754,6 +765,7 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
       tokensUsed: sqliteTokens,
       inputTokens: Math.round(sqliteTokens * 0.7),
       outputTokens: Math.round(sqliteTokens * 0.3),
+      toolCalls: 0,
       prompt,
     };
   } catch (err) {
@@ -772,11 +784,179 @@ function discoverCodexSessionData(repoPath: string): CodexSessionData | null {
  * Token events have a `total_token_usage` field with cumulative counts.
  * We take the max seen values as the final totals.
  */
+/**
+ * Extract user prompts with timestamps from the agent's session log so the
+ * post-commit hook can attribute each commit to the prompt that produced
+ * it. Codex/Gemini don't fire user-prompt-submit hooks, so without this
+ * every commit ends up stamped with promptIndex 0 (the rest being filled
+ * in only at session end).
+ *
+ * Returns prompts in chronological order with millisecond timestamps; the
+ * index in the array IS the promptIndex used for downstream UI.
+ */
+interface PromptTimelineEntry {
+  text: string;
+  timestamp: number;
+}
+
+function readCodexRolloutFile(repoPath: string): string | null {
+  try {
+    const codexDir = path.join(os.homedir(), '.codex');
+    if (!fs.existsSync(codexDir)) return null;
+    const stateFiles = fs.readdirSync(codexDir)
+      .filter(f => f.startsWith('state_') && f.endsWith('.sqlite'))
+      .map(f => ({ path: path.join(codexDir, f), mtime: fs.statSync(path.join(codexDir, f)).mtimeMs }))
+      .sort((a, b) => b.mtime - a.mtime);
+    if (stateFiles.length === 0) return null;
+
+    const repoBasename = path.basename(repoPath);
+    if (!/^[a-zA-Z0-9_.\-]+$/.test(repoBasename)) return null;
+    const escapedBasename = repoBasename.replace(/%/g, '\\%').replace(/_/g, '\\_');
+    const threadQuery = `SELECT id, rollout_path FROM threads WHERE cwd LIKE '%${escapedBasename}%' ORDER BY updated_at DESC LIMIT 1;`;
+    const raw = execFileSync('sqlite3', [stateFiles[0].path, threadQuery], {
+      encoding: 'utf-8' as const,
+      timeout: 3000,
+      stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
+    }).trim();
+    if (!raw) return null;
+    const parts = raw.split('|');
+    const threadId = parts[0];
+    const rolloutPath = parts[1] || '';
+
+    let rolloutFile = '';
+    if (rolloutPath && fs.existsSync(rolloutPath)) rolloutFile = rolloutPath;
+    else if (rolloutPath) {
+      const abs = path.join(codexDir, rolloutPath);
+      if (fs.existsSync(abs)) rolloutFile = abs;
+    }
+    if (!rolloutFile) {
+      const sessionsDir = path.join(codexDir, 'sessions');
+      if (fs.existsSync(sessionsDir)) rolloutFile = findLatestRollout(sessionsDir, threadId);
+    }
+    if (!rolloutFile) return null;
+
+    if (rolloutFile.endsWith('.zst') || rolloutFile.endsWith('.zstd')) {
+      const compressed = fs.readFileSync(rolloutFile);
+      const decompressed = fzstd.decompress(new Uint8Array(compressed));
+      return Buffer.from(decompressed).toString('utf-8');
+    }
+    return fs.readFileSync(rolloutFile, 'utf-8');
+  } catch {
+    return null;
+  }
+}
+
+function getCodexPromptsTimeline(repoPath: string): PromptTimelineEntry[] {
+  const content = readCodexRolloutFile(repoPath);
+  if (!content) return [];
+  const out: PromptTimelineEntry[] = [];
+  for (const line of content.split('\n')) {
+    if (!line.trim()) continue;
+    try {
+      const event = JSON.parse(line);
+      const eventType = event?.type || event?.event || '';
+      if (eventType !== 'item.created' && eventType !== 'message') continue;
+      const item = event?.data || event?.item || event;
+      const role = item?.role || item?.type;
+      if (role !== 'user' && role !== 'human') continue;
+      const content_ = item?.content || item?.text || item?.message;
+      const text = typeof content_ === 'string'
+        ? content_
+        : Array.isArray(content_)
+          ? content_.map((c: any) => c?.text || c?.content || '').join('')
+          : '';
+      if (!text || !text.trim()) continue;
+      // Codex events carry an ISO-ish timestamp on most variants.
+      const tsRaw = event?.timestamp || event?.ts || event?.time || event?.created_at || item?.timestamp;
+      const ts = tsRaw ? new Date(tsRaw).getTime() : NaN;
+      out.push({ text, timestamp: Number.isFinite(ts) ? ts : 0 });
+    } catch { /* skip */ }
+  }
+  // If timestamps are missing, preserve insertion order (the JSONL itself is
+  // chronological).
+  return out;
+}
+
+function getGeminiPromptsTimeline(transcriptPath: string): PromptTimelineEntry[] {
+  if (!transcriptPath || !fs.existsSync(transcriptPath)) return [];
+  try {
+    const raw = fs.readFileSync(transcriptPath, 'utf-8');
+    // Gemini transcripts are JSON arrays of {role, parts:[{text}], timestamp}
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    const out: PromptTimelineEntry[] = [];
+    for (const m of parsed) {
+      const role = m?.role;
+      if (role !== 'user' && role !== 'human') continue;
+      const text = typeof m.content === 'string'
+        ? m.content
+        : Array.isArray(m?.parts)
+          ? m.parts.map((p: any) => p?.text || '').join('')
+          : '';
+      if (!text || !text.trim()) continue;
+      const tsRaw = m?.timestamp || m?.ts || m?.created_at;
+      const ts = tsRaw ? new Date(tsRaw).getTime() : 0;
+      out.push({ text, timestamp: Number.isFinite(ts) ? ts : 0 });
+    }
+    return out;
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * Pick the prompt that most likely produced this commit.
+ *
+ * 1. If we have explicit prompts in state (Claude path), use the latest one.
+ * 2. Else discover the agent's prompts from its transcript (Codex/Gemini)
+ *    and find the latest prompt whose timestamp ≤ the commit's timestamp.
+ *    Falls back to the last prompt if no usable timestamps are present.
+ */
+function resolvePromptForCommit(
+  state: SessionState | null,
+  repoPath: string,
+  commitTimestampMs: number,
+): { promptIndex: number; promptText: string; total: number } {
+  const fromState = state?.prompts || [];
+  if (fromState.length > 0) {
+    const idx = fromState.length - 1;
+    return { promptIndex: idx, promptText: fromState[idx], total: fromState.length };
+  }
+
+  // Codex
+  const isCodex = !!state?.model && /gpt|codex|o1-|o3-|o4-/i.test(state.model);
+  let timeline: PromptTimelineEntry[] = isCodex ? getCodexPromptsTimeline(repoPath) : [];
+
+  // Gemini fallback
+  if (timeline.length === 0 && state?.transcriptPath && fs.existsSync(state.transcriptPath)) {
+    timeline = getGeminiPromptsTimeline(state.transcriptPath);
+  }
+
+  if (timeline.length === 0) {
+    return { promptIndex: 0, promptText: '', total: 0 };
+  }
+
+  // Match commit to the latest prompt at-or-before commitTimestamp.
+  let pickIdx = -1;
+  for (let i = 0; i < timeline.length; i++) {
+    const ts = timeline[i].timestamp;
+    if (ts > 0 && ts <= commitTimestampMs) pickIdx = i;
+    else if (ts === 0) pickIdx = i; // unknown timestamp — fall through
+  }
+  if (pickIdx < 0) pickIdx = timeline.length - 1;
+
+  return {
+    promptIndex: pickIdx,
+    promptText: timeline[pickIdx].text,
+    total: timeline.length,
+  };
+}
+
 function parseCodexRollout(
   codexDir: string,
   rolloutPath: string,
   threadId: string,
-): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; transcript?: string } | null {
+): { tokensUsed: number; inputTokens: number; outputTokens: number; model?: string; turnCount: number; toolCalls: number; transcript?: string } | null {
   try {
     // Try to resolve the rollout file
     let rolloutFile = '';
@@ -800,29 +980,19 @@ function parseCodexRollout(
 
     if (!rolloutFile) return null;
 
-    // Read and decompress
+    // Read + decompress. Previously relied on `zstd` CLI or `python3+zstandard`
+    // which many users don't have installed — token capture silently degraded
+    // to character-based estimation. fzstd is a pure-JS decoder (~20KB) so this
+    // path now works on any machine with just Node.
     let content: string;
     if (rolloutFile.endsWith('.zst') || rolloutFile.endsWith('.zstd')) {
-      // Use zstd CLI to decompress — avoid adding a native dep
       try {
-        content = execFileSync('zstd', ['-d', '-c', rolloutFile], {
-          encoding: 'utf-8' as const,
-          timeout: 10000,
-          stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'],
-          maxBuffer: 50 * 1024 * 1024,
-        });
-      } catch {
-        // zstd might not be installed — try python3 as fallback
-        try {
-          content = execFileSync(
-            'python3',
-            ['-c', "import sys,zstandard as z;sys.stdout.buffer.write(z.ZstdDecompressor().decompress(open(sys.argv[1],'rb').read()))", rolloutFile],
-            { encoding: 'utf-8' as const, timeout: 10000, stdio: ['pipe', 'pipe', 'pipe'] as ['pipe', 'pipe', 'pipe'], maxBuffer: 50 * 1024 * 1024 },
-          );
-        } catch {
-          debugLog('codex', 'cannot decompress .zst — neither zstd nor python3+zstandard available');
-          return null;
-        }
+        const compressed = fs.readFileSync(rolloutFile);
+        const decompressed = fzstd.decompress(new Uint8Array(compressed));
+        content = Buffer.from(decompressed).toString('utf-8');
+      } catch (err) {
+        debugLog('codex', 'fzstd decompress failed', { error: String(err) });
+        return null;
       }
     } else {
       content = fs.readFileSync(rolloutFile, 'utf-8');
@@ -835,6 +1005,7 @@ function parseCodexRollout(
     let maxTotalTokens = 0;
     let model: string | undefined;
     let turnCount = 0;
+    let toolCalls = 0;
 
     // Build transcript from conversation events
     const turns: Array<{ role: string; content: string }> = [];
@@ -890,6 +1061,7 @@ function parseCodexRollout(
         // Tool calls — record as assistant actions
         if (eventType === 'tool_call' || eventType === 'function_call' ||
             (event?.data?.type === 'function_call') || (event?.data?.type === 'shell')) {
+          toolCalls++;
           const tool = event?.data?.name || event?.data?.command || event?.name || 'tool';
           const args = event?.data?.arguments || event?.data?.args || '';
           const argStr = typeof args === 'string' ? args : JSON.stringify(args);
@@ -909,6 +1081,7 @@ function parseCodexRollout(
       outputTokens: maxOutputTokens,
       model,
       turnCount,
+      toolCalls,
       transcript: turns.length > 0 ? JSON.stringify(turns) : undefined,
     };
   } catch (err) {
@@ -1314,15 +1487,12 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       // Touch the state file to keep it fresh
       saveSessionState(existing, repoPath, existing.sessionTag);
 
-      // Auto-checkpoint: capture pre-prompt state for rewind capability
-      try {
-        createCheckpoint(repoPath, {
-          sessionTag: existing.sessionTag,
-          type: 'pre-prompt',
-          model: existing.model,
-          promptIndex: existing.prompts.length,
-        });
-      } catch { /* non-fatal */ }
+      // Pre-prompt snapshots removed on purpose. The user-facing rule is
+      // "snapshots only for prompts that change code AND get committed",
+      // so capturing the pre-prompt working tree (no changes possible yet)
+      // produced empty rows the user couldn't act on. The post-commit hook
+      // condenses the latest stop-snapshot for each commit, which is the
+      // right anchor for "what did this prompt change?"
 
       // Restart heartbeat to keep session alive between prompts
       const stateFileReuse = getStatePath(repoPath, existing.sessionTag);
@@ -1460,6 +1630,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
     let agentSystemPrompt: string | undefined;
     let activePolicies: string[] | undefined;
     let enforcementRules: any[] | undefined;
+    let verboseCapture = false;
     let apiStartedAt: string | undefined;
 
     if (connected) {
@@ -1482,11 +1653,12 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
         agentSystemPrompt = (result.agentSystemPrompt as string) || undefined;
         activePolicies = result.activePolicies && Array.isArray(result.activePolicies) ? result.activePolicies : undefined;
         enforcementRules = result.enforcementRules && Array.isArray(result.enforcementRules) ? result.enforcementRules : undefined;
+        verboseCapture = result.verboseCapture === true;
         // Use server startedAt if returned (deduped sessions preserve original start time)
         if (result.startedAt) {
           apiStartedAt = result.startedAt as string;
         }
-        debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt });
+        debugLog('session-start', 'api returned', { sessionId, deduped: !!result.startedAt, verboseCapture });
       } catch (apiErr: any) {
         // API failed — fall back to local session instead of aborting entirely
         debugLog('session-start', 'API failed, falling back to local', { message: apiErr.message });
@@ -1517,6 +1689,7 @@ async function handleSessionStart(input: Record<string, any>, agentSlug?: string
       agentSystemPrompt,
       activePolicies,
       enforcementRules,
+      verboseCapture,
     };
 
     // Multi-repo: store all repo paths and per-repo git state
@@ -1952,6 +2125,25 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
       state.transcriptPath = input.transcript_path;
     }
 
+    // ── Mid-session branch tracking ─────────────────────────────────────
+    // Agents that don't fire PostToolUse (Codex) otherwise never get a
+    // branch refresh until session-end, so sessions look stuck on the
+    // branch they started on even after the agent `git checkout`s a new one.
+    // getBranch() just reads .git/HEAD so it's cheap to do on every prompt.
+    try {
+      const repoPath = state.repoPath || hookCwd;
+      const currentBranch = getBranch(repoPath);
+      if (currentBranch && currentBranch !== state.branch) {
+        debugLog('user-prompt-submit', 'branch changed', { from: state.branch, to: currentBranch });
+        state.branch = currentBranch;
+        if (isConnectedMode() && state.sessionId && !state.sessionId.startsWith('local-')) {
+          api.updateSession(state.sessionId, { branch: currentBranch }).catch(() => {});
+        }
+      }
+    } catch {
+      // non-fatal
+    }
+
     // Ensure session stays RUNNING (may have been auto-expired by listAllActiveSessions)
     state.status = 'RUNNING';
     saveSessionState(state, state.repoPath || hookCwd, state.sessionTag);
@@ -1968,8 +2160,8 @@ async function handleUserPromptSubmit(input: Record<string, any>, agentSlug?: st
         let displayTranscript = '';
         try {
           if (state.transcriptPath) {
-            parsed = parseTranscript(state.transcriptPath);
-            displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
+            parsed = parseTranscript(state.transcriptPath, { since: state.startedAt });
+            displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
           }
         } catch {
           // Transcript may not be readable mid-session for all agents
@@ -2186,10 +2378,10 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
 
   try {
     debugLog('stop', 'parsing transcript', { transcriptPath: state.transcriptPath });
-    const parsed = parseTranscript(state.transcriptPath);
+    const parsed = parseTranscript(state.transcriptPath, { since: state.startedAt });
 
     // Format transcript for dashboard display (converts JSONL → [{role, content}] JSON)
-    let displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
+    let displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
     debugLog('stop', 'formatted transcript', { displayLength: displayTranscript.length });
 
     // For Cursor: discover agent transcript JSONL for real conversation data + better token estimates
@@ -2229,20 +2421,28 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
       }
     }
 
-    // For Codex: supplement with data from its SQLite database when transcript is missing
-    const codexData = (!state.transcriptPath && parsed.tokensUsed === 0)
+    // For Codex: supplement with data from its SQLite database / rollout JSONL.
+    // Gate on agentSlug so we don't accidentally pull Codex data into a
+    // different agent's session. Run whenever we don't yet have real tokens —
+    // don't also require empty transcriptPath, since Codex occasionally
+    // populates it and we still want the rollout's richer numbers.
+    const codexData = (agentSlug === 'codex' && parsed.tokensUsed === 0)
       ? discoverCodexSessionData(state.repoPath)
       : null;
     if (codexData) {
       debugLog('stop', 'supplementing with Codex data', {
         model: codexData.model,
         tokens: codexData.tokensUsed,
+        toolCalls: codexData.toolCalls,
         hasTranscript: !!codexData.transcript,
       });
       if (!parsed.model) parsed.model = codexData.model;
       parsed.tokensUsed = codexData.tokensUsed;
       parsed.inputTokens = codexData.inputTokens;
       parsed.outputTokens = codexData.outputTokens;
+      if (codexData.toolCalls > 0 && parsed.toolCalls === 0) {
+        parsed.toolCalls = codexData.toolCalls;
+      }
       if (codexData.prompt && state.prompts.length === 0) {
         state.prompts.push(codexData.prompt);
       }
@@ -2484,6 +2684,8 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
         inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
         outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
+        cacheReadTokens: parsed.cacheReadTokens > 0 ? parsed.cacheReadTokens : undefined,
+        cacheCreationTokens: parsed.cacheCreationTokens > 0 ? parsed.cacheCreationTokens : undefined,
         toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
@@ -2567,26 +2769,37 @@ async function handleStop(input: Record<string, any>, agentSlug?: string): Promi
         uncommittedDiff: pm.uncommittedDiff,
       }));
     }
-    // Auto-checkpoint: save working tree state after each AI turn
-    // Includes attribution data (lines added/removed by AI)
-    try {
-      const cpId = createCheckpoint(state.repoPath, {
-        sessionTag: state.sessionTag,
-        prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
-        model: model || state.model,
-        tokensUsed: parsed.tokensUsed || 0,
-        costUsd: costUsd || 0,
-        promptIndex: prompts.length,
-        type: 'auto',
-        linesAdded: gitCapture.linesAdded || 0,
-        linesRemoved: gitCapture.linesRemoved || 0,
-        transcriptPath: state.transcriptPath,
-      });
-      if (cpId) {
-        debugLog('stop', 'auto-checkpoint created', { checkpointId: cpId, promptIndex: prompts.length });
+    // Auto-snapshot: save working tree state after each AI turn — but only
+    // when the turn actually produced code changes. Empty turns (the user
+    // asked a question, the agent answered with no edits) used to leave a
+    // "Snapshot" entry with "No diff captured for this snapshot", which
+    // bloated the snapshots list with un-restorable rows. The post-commit
+    // hook later promotes the latest auto-snapshot for each commit, so
+    // anything that doesn't get committed will fall off when the shadow
+    // branch is cleaned at session-end.
+    const turnLines = (gitCapture.linesAdded || 0) + (gitCapture.linesRemoved || 0);
+    if (turnLines > 0) {
+      try {
+        const cpId = createSnapshot(state.repoPath, {
+          sessionTag: state.sessionTag,
+          prompt: prompts.length > 0 ? prompts[prompts.length - 1] : undefined,
+          model: model || state.model,
+          tokensUsed: parsed.tokensUsed || 0,
+          costUsd: costUsd || 0,
+          promptIndex: prompts.length,
+          type: 'auto',
+          linesAdded: gitCapture.linesAdded || 0,
+          linesRemoved: gitCapture.linesRemoved || 0,
+          transcriptPath: state.transcriptPath,
+        });
+        if (cpId) {
+          debugLog('stop', 'auto-snapshot created', { snapshotId: cpId, promptIndex: prompts.length, lines: turnLines });
+        }
+      } catch (cpErr: any) {
+        debugLog('stop', 'auto-snapshot failed (non-fatal)', { message: cpErr.message });
       }
-    } catch (cpErr: any) {
-      debugLog('stop', 'auto-checkpoint failed (non-fatal)', { message: cpErr.message });
+    } else {
+      debugLog('stop', 'auto-snapshot skipped (no code changes this turn)', { promptIndex: prompts.length });
     }
 
     // Re-save state with RUNNING status FIRST so it survives any errors below
@@ -2681,10 +2894,10 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
   }
 
   try {
-    const parsed = parseTranscript(state.transcriptPath);
+    const parsed = parseTranscript(state.transcriptPath, { since: state.startedAt });
 
     // Format transcript for dashboard display (converts JSONL → [{role, content}] JSON)
-    let displayTranscript = formatTranscriptForDisplay(state.transcriptPath);
+    let displayTranscript = formatTranscriptForDisplay(state.transcriptPath, { verbose: !!state.verboseCapture });
     debugLog('session-end', 'formatted transcript', { displayLength: displayTranscript.length });
 
     const prompts = parsed.prompts.length > 0 ? parsed.prompts : state.prompts;
@@ -2841,6 +3054,8 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         tokensUsed: parsed.tokensUsed > 0 ? parsed.tokensUsed : undefined,
         inputTokens: parsed.inputTokens > 0 ? parsed.inputTokens : undefined,
         outputTokens: parsed.outputTokens > 0 ? parsed.outputTokens : undefined,
+        cacheReadTokens: parsed.cacheReadTokens > 0 ? parsed.cacheReadTokens : undefined,
+        cacheCreationTokens: parsed.cacheCreationTokens > 0 ? parsed.cacheCreationTokens : undefined,
         toolCalls: parsed.toolCalls > 0 ? parsed.toolCalls : undefined,
         durationMs: durationMs > 0 ? durationMs : undefined,
         costUsd: costUsd > 0 ? costUsd : undefined,
@@ -2983,22 +3198,15 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
       }
     }
   } finally {
-    // Create final session-end checkpoint with transcript
-    try {
-      const finalCpId = createCheckpoint(state.repoPath, {
-        sessionTag: state.sessionTag,
-        type: 'session-end',
-        model: state.model,
-        prompt: state.prompts.length > 0 ? state.prompts[state.prompts.length - 1] : undefined,
-        promptIndex: state.prompts.length,
-        transcriptPath: state.transcriptPath,
-      });
-      if (finalCpId) {
-        debugLog('session-end', 'final checkpoint created', { checkpointId: finalCpId });
-      }
-    } catch { /* non-fatal */ }
+    // Final session-end snapshot removed. By the time we reach here the
+    // post-commit hook has already condensed the per-commit snapshots; an
+    // additional "session-end" row at this point captures whatever happens
+    // to be in the working tree — which for sessions that ended without a
+    // final commit is just unstaged scratch. Keeping it created the empty
+    // rows the user reported in the snapshots list. The condensation /
+    // shadow-cleanup below still runs.
 
-    // Condense all session checkpoints to permanent branch + clean up shadow branch
+    // Condense all session snapshots to permanent branch + clean up shadow branch
     try {
       const headSha = getHeadSha(state.repoPath) || 'unknown';
       const { condensed, cleaned } = condenseAndCleanupSession(
@@ -3007,9 +3215,9 @@ async function handleSessionEnd(input: Record<string, any>, agentSlug?: string):
         headSha,
         state.transcriptPath,
       );
-      debugLog('session-end', 'checkpoints condensed + shadow cleaned', { condensed, cleaned });
+      debugLog('session-end', 'snapshots condensed + shadow cleaned', { condensed, cleaned });
     } catch (cpErr: any) {
-      debugLog('session-end', 'checkpoint condensation failed (non-fatal)', { message: cpErr.message });
+      debugLog('session-end', 'snapshot condensation failed (non-fatal)', { message: cpErr.message });
     }
 
     // Stop the heartbeat daemon
@@ -3093,8 +3301,47 @@ export async function handlePostCommit(): Promise<void> {
   // Detect current branch (may have changed since session started)
   const currentBranch = getBranch(hookCwd);
 
-  // Add Origin-Session trailer to commit message (like Entire's Entire-Checkpoint trailer)
+  // Add Origin-Session trailer to commit message (like Entire's Entire-Snapshot trailer)
   const apiUrl = config?.apiUrl || 'https://getorigin.io';
+
+  // ── Shadow-sync: post commit metadata to API regardless of session state ──
+  // The session-aware path below only fires when an Origin session was active
+  // for this commit. That misses: (a) commits made by AI without Origin
+  // running, (b) plain human commits, (c) commits done while the heartbeat
+  // process had died. Without shadow-sync the dashboard's repo view stays
+  // empty until `git push` triggers the GitHub/GitLab webhook. Fire-and-
+  // forget so a slow API call doesn't hold up the user's commit.
+  if (connected) {
+    try {
+      let repoUrl: string | undefined;
+      try {
+        repoUrl = execFileSync('git', ['config', '--get', 'remote.origin.url'], execOpts).trim() || undefined;
+      } catch { /* no remote, fine */ }
+      const committedAtIso = (() => {
+        try {
+          return execFileSync('git', ['log', '-1', '--format=%cI'], execOpts).trim() || undefined;
+        } catch { return undefined; }
+      })();
+      api.ingestCommits({
+        repoPath,
+        repoUrl,
+        commits: [{
+          sha: commitSha,
+          message: commitMessage,
+          author: commitAuthor,
+          branch: currentBranch || null,
+          filesChanged,
+          additions: linesAdded,
+          deletions: linesRemoved,
+          committedAt: committedAtIso,
+        }],
+      })
+        .then((r) => debugLog('post-commit', 'shadow ingest ok', { ingested: r?.ingested, repoId: r?.repoId }))
+        .catch((err: any) => debugLog('post-commit', 'shadow ingest failed (non-fatal)', { message: err?.message }));
+    } catch (err: any) {
+      debugLog('post-commit', 'shadow ingest setup failed', { message: err?.message });
+    }
+  }
 
   // Get ALL active sessions for this repo (concurrent session support)
   const activeSessions = listActiveSessions(hookCwd);
@@ -3211,20 +3458,20 @@ export async function handlePostCommit(): Promise<void> {
   // F13: Respect config.commitLinking setting (always|prompt|never)
   const commitLinkingConfig = config?.commitLinking || 'always';
 
-  // Condense active checkpoints to permanent storage + add bidirectional linking
-  let latestCheckpointId: string | undefined;
+  // Condense active snapshots to permanent storage + add bidirectional linking
+  let latestSnapshotId: string | undefined;
   if (state && state.sessionTag) {
     try {
-      const checkpoints = listCheckpoints(repoPath, state.sessionTag);
-      if (checkpoints.length > 0) {
-        const latest = checkpoints[checkpoints.length - 1];
-        latestCheckpointId = latest.id;
-        // Condense to permanent orphan branch with transcript (like Entire's entire/checkpoints/v1)
-        condenseCheckpoint(repoPath, latest.id, latest, commitSha, state.transcriptPath);
-        debugLog('post-commit', 'condensed checkpoint to permanent branch', { checkpointId: latest.id, hasTranscript: !!state.transcriptPath });
+      const snapshots = listSnapshots(repoPath, state.sessionTag);
+      if (snapshots.length > 0) {
+        const latest = snapshots[snapshots.length - 1];
+        latestSnapshotId = latest.id;
+        // Condense to permanent orphan branch with transcript (like Entire's entire/snapshots/v1)
+        condenseSnapshot(repoPath, latest.id, latest, commitSha, state.transcriptPath);
+        debugLog('post-commit', 'condensed snapshot to permanent branch', { snapshotId: latest.id, hasTranscript: !!state.transcriptPath });
       }
     } catch (cpErr: any) {
-      debugLog('post-commit', 'checkpoint condensation failed (non-fatal)', { message: cpErr.message });
+      debugLog('post-commit', 'snapshot condensation failed (non-fatal)', { message: cpErr.message });
     }
   }
 
@@ -3272,8 +3519,8 @@ export async function handlePostCommit(): Promise<void> {
       linesAdded,
       linesRemoved,
       originUrl: state ? `${apiUrl}/sessions/${state.sessionId}` : '',
-      checkpoint: true,
-      checkpointAt: new Date().toISOString(),
+      snapshot: true,
+      snapshotAt: new Date().toISOString(),
       filesChanged,
     });
     debugLog('post-commit', 'git notes written');
@@ -3294,14 +3541,48 @@ export async function handlePostCommit(): Promise<void> {
       linesRemoved,
     };
 
+    // Resolve the commit's timestamp once, outside the per-session loop.
+    // resolvePromptForCommit() uses it to match the commit to the prompt
+    // that most likely produced it (Codex/Gemini path).
+    let commitTimestampMs = Date.now();
+    try {
+      const iso = execFileSync('git', ['log', '-1', '--format=%cI', commitSha], execOpts).trim();
+      const parsed = iso ? new Date(iso).getTime() : NaN;
+      if (Number.isFinite(parsed)) commitTimestampMs = parsed;
+    } catch { /* fall back to wallclock */ }
+
     if (connected) {
       for (const s of activeSessions) {
+        // Pick the prompt this commit belongs to. Claude path uses
+        // s.prompts (populated on user-prompt-submit). Codex/Gemini have
+        // no submit hook — resolvePromptForCommit walks their transcript
+        // and picks the latest prompt timestamped at-or-before this
+        // commit. Fixes "all commits attributed to prompt #1" for
+        // Codex sessions with multiple prompts.
+        const resolved = resolvePromptForCommit(s, repoPath, commitTimestampMs);
+        const latestPromptIdx = resolved.promptIndex;
+        const latestPromptText = resolved.promptText;
+        const perPromptUpdate = {
+          promptIndex: latestPromptIdx,
+          promptText: latestPromptText.slice(0, 1000),
+          filesChanged,
+          diff: diff.length > 100_000 ? diff.slice(0, 100_000) : diff,
+          linesAdded,
+          linesRemoved,
+          commitSha,
+        };
         try {
-          debugLog('post-commit', 'sending incremental update', { sessionId: s.sessionId, filesChanged: filesChanged.length });
+          debugLog('post-commit', 'sending incremental update', {
+            sessionId: s.sessionId,
+            filesChanged: filesChanged.length,
+            attributedPromptIdx: latestPromptIdx,
+            commitSha,
+          });
           await api.updateSession(s.sessionId, {
             filesChanged: filesChanged.length > 0 ? filesChanged : undefined,
             branch: currentBranch || undefined,
             gitCapture,
+            promptChanges: latestPromptText ? [perPromptUpdate] : undefined,
           });
           debugLog('post-commit', 'API update complete', { sessionId: s.sessionId });
         } catch (err: any) {
@@ -3321,7 +3602,7 @@ export async function handlePostCommit(): Promise<void> {
 
     // Parse transcript for full metrics (or use empty defaults for agents without transcripts)
     const parsed = state.transcriptPath
-      ? parseTranscript(state.transcriptPath)
+      ? parseTranscript(state.transcriptPath, { since: state.startedAt })
       : { prompts: [], filesChanged: [], tokensUsed: 0, inputTokens: 0, outputTokens: 0, cacheReadTokens: 0, cacheCreationTokens: 0, toolCalls: 0, summary: '', model: '', transcript: '' };
     const promptMappings = state.transcriptPath
       ? extractPromptFileMappings(state.transcriptPath)
@@ -3430,6 +3711,68 @@ function enforceFileRestrictions(
   return null;
 }
 
+/**
+ * Lazy multi-repo attribution.
+ *
+ * Resolves each file path to its containing git repo. If any path lives in
+ * a repo that isn't yet attached to this session, notifies the API to attach
+ * it and tracks per-repo git state locally. This is how we pick up sibling
+ * repos the agent actually touches — without blindly attaching every repo
+ * under the cwd at session-start.
+ */
+async function attachReposForFiles(
+  state: SessionState,
+  filePaths: string[],
+  saveCwd: string,
+): Promise<void> {
+  if (!filePaths.length) return;
+  if (!state.sessionId || state.sessionId.startsWith('local-')) return;
+  if (!isConnectedMode()) return;
+
+  const attached = new Set<string>();
+  if (state.repoPath) attached.add(state.repoPath);
+  for (const rp of state.repoPaths || []) attached.add(rp);
+
+  const newRoots = new Set<string>();
+  for (const fp of filePaths) {
+    if (!fp) continue;
+    const abs = path.isAbsolute(fp) ? fp : path.resolve(state.repoPath || saveCwd, fp);
+    let dir: string;
+    try {
+      dir = fs.statSync(abs).isDirectory() ? abs : path.dirname(abs);
+    } catch {
+      dir = path.dirname(abs);
+    }
+    const root = getGitRoot(dir);
+    if (!root || attached.has(root) || newRoots.has(root)) continue;
+    newRoots.add(root);
+  }
+  if (newRoots.size === 0) return;
+
+  let mutated = false;
+  for (const root of newRoots) {
+    try {
+      await api.attachRepo(state.sessionId, root);
+    } catch (err: any) {
+      debugLog('attach-repo', 'failed (non-fatal)', { root, error: err?.message });
+      continue;
+    }
+    if (!state.repoPaths) state.repoPaths = state.repoPath ? [state.repoPath] : [];
+    state.repoPaths.push(root);
+    if (!state.perRepoState) state.perRepoState = {};
+    state.perRepoState[root] = {
+      headShaAtStart: getHeadSha(root),
+      headShaAtLastStop: null,
+      prePromptSha: getHeadSha(root),
+      prePromptDirtyFiles: getDirtyFiles(root),
+      branch: getBranch(root),
+    };
+    mutated = true;
+    debugLog('attach-repo', 'attached', { root, sessionId: state.sessionId });
+  }
+  if (mutated) saveSessionState(state, saveCwd, state.sessionTag);
+}
+
 async function handlePreToolUse(input: Record<string, any>, agentSlug?: string): Promise<void> {
   debugLog('pre-tool-use', 'begin', { tool_name: input.tool_name, cwd: input.cwd });
 
@@ -3441,20 +3784,33 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
   }
   const { state, saveCwd } = found;
 
-  // ── Policy Enforcement: FILE_RESTRICTION ──────────────────────────────
-  if (state.enforcementRules && state.enforcementRules.length > 0) {
-    const toolInput = input.tool_input || {};
-    const filePaths = extractFilePaths(input.tool_name || '', toolInput);
+  // Extract file paths once — used for both lazy repo attach and policy enforcement.
+  const toolInput = input.tool_input || {};
+  const filePaths = extractFilePaths(input.tool_name || '', toolInput);
+  if (filePaths.length > 0) {
     debugLog('pre-tool-use', 'extracted paths', { filePaths, toolName: input.tool_name });
+  }
 
-    if (filePaths.length > 0) {
-      const result = enforceFileRestrictions(state.enforcementRules, filePaths, state.repoPath);
-      if (result?.blocked) {
-        debugLog('pre-tool-use', 'BLOCKED by policy', { reason: result.reason });
-        // Exit code 2 + stderr blocks the tool for both Claude Code and Gemini CLI
-        process.stderr.write(result.reason + '\n');
-        process.exit(2);
-      }
+  // ── Lazy multi-repo attach ──────────────────────────────────────────────
+  // If the agent touches a file in a sibling repo, attach it now instead of
+  // attaching every repo under cwd upfront (the old behavior bundled unrelated
+  // projects into a single session).
+  if (filePaths.length > 0) {
+    try {
+      await attachReposForFiles(state, filePaths, saveCwd);
+    } catch {
+      // non-fatal — attribution is best-effort
+    }
+  }
+
+  // ── Policy Enforcement: FILE_RESTRICTION ──────────────────────────────
+  if (state.enforcementRules && state.enforcementRules.length > 0 && filePaths.length > 0) {
+    const result = enforceFileRestrictions(state.enforcementRules, filePaths, state.repoPath);
+    if (result?.blocked) {
+      debugLog('pre-tool-use', 'BLOCKED by policy', { reason: result.reason });
+      // Exit code 2 + stderr blocks the tool for both Claude Code and Gemini CLI
+      process.stderr.write(result.reason + '\n');
+      process.exit(2);
     }
   }
 
@@ -3468,6 +3824,17 @@ async function handlePreToolUse(input: Record<string, any>, agentSlug?: string):
         const snapId = createAutoSnapshot(state.repoPath, state.sessionTag);
         if (snapId) {
           debugLog('pre-tool-use', 'auto-snapshot created', { snapId, toolName: input.tool_name });
+          // Fire-and-forget upload so the dashboard timeline can mark a dot.
+          // Non-fatal — snapshots stay locally even if upload fails.
+          if (isConnectedMode() && state.sessionId && !state.sessionId.startsWith('local-')) {
+            api.uploadSnapshot(state.sessionId, {
+              snapshotId: snapId,
+              type: 'auto',
+              takenAt: new Date().toISOString(),
+              promptIndex: Math.max(0, (state.prompts?.length || 1) - 1),
+              commitSha: getHeadSha(state.repoPath) || undefined,
+            }).catch(() => { /* non-fatal */ });
+          }
         }
       }
     } catch {
@@ -4087,14 +4454,14 @@ export function buildOriginTrailers(
   sessionId: string,
   model: string | undefined,
   promptCount: number,
-  latestCheckpointId?: string | null,
+  latestSnapshotId?: string | null,
 ): string[] {
   const shortId = sessionId.slice(0, 12);
   const agentName = resolveAgentDisplayName(model);
   const parts = [shortId, agentName];
   if (promptCount > 0) parts.push(promptCount === 1 ? '1 prompt' : `${promptCount} prompts`);
   const trailers: string[] = [`Origin-Session: ${parts.join(' | ')}`];
-  if (latestCheckpointId) trailers.push(`Origin-Checkpoint: ${latestCheckpointId}`);
+  if (latestSnapshotId) trailers.push(`Origin-Snapshot: ${latestSnapshotId}`);
   return trailers;
 }
 
@@ -4138,7 +4505,7 @@ function pickActiveSessionForCommit(hookCwd: string): SessionState | null {
 
 /**
  * Called by .git/hooks/prepare-commit-msg.
- * Adds Origin-Session and Origin-Checkpoint trailers to COMMIT_EDITMSG
+ * Adds Origin-Session and Origin-Snapshot trailers to COMMIT_EDITMSG
  * before the commit is created. Never throws.
  */
 export async function handlePrepareCommitMsg(
@@ -4199,20 +4566,20 @@ export async function handlePrepareCommitMsg(
       return;
     }
 
-    // Find latest checkpoint for the Origin-Checkpoint trailer.
-    let latestCheckpointId: string | undefined;
+    // Find latest snapshot for the Origin-Snapshot trailer.
+    let latestSnapshotId: string | undefined;
     if (state.sessionTag) {
       try {
-        const checkpoints = listCheckpoints(repoPath, state.sessionTag);
-        if (checkpoints.length > 0) latestCheckpointId = checkpoints[checkpoints.length - 1].id;
-      } catch { /* no checkpoints is fine */ }
+        const snapshots = listSnapshots(repoPath, state.sessionTag);
+        if (snapshots.length > 0) latestSnapshotId = snapshots[snapshots.length - 1].id;
+      } catch { /* no snapshots is fine */ }
     }
 
     const trailers = buildOriginTrailers(
       state.sessionId,
       state.model,
       state.prompts?.length || 0,
-      latestCheckpointId,
+      latestSnapshotId,
     );
 
     // Use git interpret-trailers to add the trailers in-place. This handles:
@@ -4238,7 +4605,7 @@ export async function handlePrepareCommitMsg(
       });
       debugLog('prepare-commit-msg', 'trailers written', {
         sessionId: shortId,
-        checkpointId: latestCheckpointId,
+        snapshotId: latestSnapshotId,
         trailerCount: trailers.length,
       });
     } catch (trailerErr: any) {
@@ -4285,7 +4652,7 @@ export async function handlePrePush(): Promise<void> {
   const connected = !!(config?.apiKey && config?.apiUrl);
   const strategy = config?.pushStrategy || 'auto';
 
-  if (!connected || config?.checkpointRepo || strategy === 'always') {
+  if (!connected || config?.snapshotRepo || strategy === 'always') {
     // Push origin-sessions branch if it exists (standalone mode only)
     try {
       execFileSync('git', ['rev-parse', 'refs/heads/origin-sessions'], execOpts);

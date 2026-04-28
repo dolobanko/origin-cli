@@ -58,7 +58,6 @@ import { showCommand } from './commands/show.js';
 import { attachCommand } from './commands/attach.js';
 import { backfillCommand } from './commands/backfill.js';
 import { snapshotSaveCommand, snapshotListCommand, snapshotRestoreCommand, snapshotCleanCommand } from './commands/snapshot.js';
-import { checkpointListCommand, checkpointSaveCommand, checkpointRestoreCommand, checkpointDiffCommand, checkpointCleanCommand } from './commands/checkpoint.js';
 import { promptStatusCommand } from './commands/prompt-status.js';
 import { shellPromptCommand } from './commands/shell-prompt.js';
 import {
@@ -125,9 +124,10 @@ program.command('login')
   .option('--profile <name>', 'Save as named profile (default: auto-detect "dev" or "team")')
   .action(loginCommand);
 program.command('init')
-  .description('Register this machine as an agent host')
+  .description('Register this machine + install GLOBAL git hooks (tracks all repos)')
   .option('--standalone', 'Force standalone mode (skip API, even when logged in)')
-  .option('--no-hooks', 'Skip automatic global hook installation')
+  .option('--local', 'Install hooks for this repo only (default: global — tracks every repo)')
+  .option('--no-hooks', 'Skip hook installation entirely')
   .action(initCommand);
 program.command('enable')
   .description('Install Origin hooks for session tracking')
@@ -460,10 +460,10 @@ program.command('resume [branch]')
   .action(resumeCommand);
 
 program.command('rewind')
-  .description('Rewind to a previous AI checkpoint (time travel)')
-  .option('-i, --interactive', 'Interactive checkpoint browser')
+  .description('Rewind to a previous AI snapshot (time travel)')
+  .option('-i, --interactive', 'Interactive snapshot browser')
   .option('-t, --to <sha>', 'Rewind to specific commit SHA')
-  .option('--list', 'List checkpoints without rewinding')
+  .option('--list', 'List snapshots without rewinding')
   .action(rewindCommand);
 
 // ─── Snapshots ────────────────────────────────────────────────────────────
@@ -471,7 +471,8 @@ program.command('rewind')
 const snapshot = program.command('snapshot').description('Mid-session shadow snapshots (no commits)');
 snapshot.action(snapshotSaveCommand);
 snapshot.command('list')
-  .description('List all snapshots for current session')
+  .description('List every snapshot in this repo (use --session <tag> to filter)')
+  .option('-s, --session <tag>', 'Only show snapshots for this session tag')
   .action(snapshotListCommand);
 snapshot.command('restore <id>')
   .description('Restore working tree to a snapshot')
@@ -479,28 +480,6 @@ snapshot.command('restore <id>')
 snapshot.command('clean')
   .description('Remove all shadow snapshots')
   .action(snapshotCleanCommand);
-
-// ─── Checkpoints (unified timeline: snapshots + commits) ─────────────────
-
-const checkpoint = program.command('checkpoint').description('Time-travel checkpoints — auto-saved after each AI prompt');
-checkpoint.action(checkpointListCommand);
-checkpoint.command('list')
-  .description('List all checkpoints for current session')
-  .option('-a, --all', 'Show checkpoints from all sessions')
-  .action(checkpointListCommand);
-checkpoint.command('save')
-  .description('Manually save a checkpoint')
-  .option('-m, --message <msg>', 'Checkpoint description')
-  .action(checkpointSaveCommand);
-checkpoint.command('restore <id>')
-  .description('Restore working tree to a checkpoint')
-  .action(checkpointRestoreCommand);
-checkpoint.command('diff [fromId] [toId]')
-  .description('Show diff between checkpoints (or last checkpoint vs current)')
-  .action(checkpointDiffCommand);
-checkpoint.command('clean')
-  .description('Remove all checkpoint branches')
-  .action(checkpointCleanCommand);
 
 program.command('share <sessionId>')
   .description('Create a shareable prompt bundle from a session')
@@ -921,7 +900,7 @@ const COMMAND_GROUPS: Array<{ label: string; commands: string[] }> = [
   },
   {
     label: 'TIME TRAVEL',
-    commands: ['rewind', 'snapshot', 'checkpoint'],
+    commands: ['rewind', 'snapshot'],
   },
   {
     label: 'CHAT / AI',

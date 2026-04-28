@@ -58,6 +58,7 @@ export interface SessionState {
   tabCompletions?: TabCompletionStats;
   agentSystemPrompt?: string; // Cached agent system prompt for session resume
   activePolicies?: string[];  // Cached active policies for session resume
+  verboseCapture?: boolean;   // Opt-in flag from the repo: capture full tool inputs + tool_result bodies
   prePromptDirtyFiles?: string[]; // Files that were already dirty (uncommitted) before current prompt
   enforcementRules?: Array<{ type: string; condition: string; action: string; severity: string }>;
   trailId?: string;           // Trail ID if session is linked to an active trail
@@ -139,8 +140,14 @@ export function discoverGitRoot(cwd?: string): string | null {
 }
 
 /**
- * Discover ALL git repos under a directory (immediate subdirectories).
- * Used when the cwd itself is not a git repo but contains multiple repos.
+ * Discover git repos in known multi-repo workspace layouts.
+ *
+ * Only matches the intentional cowork pattern (`.openclaw/workspace/*` or
+ * `workspace/*`). We deliberately do NOT scan arbitrary subdirectories —
+ * running an agent from a parent dir like `~` or `~/projects` used to attach
+ * every unrelated repo under it to the session. Repos that aren't part of
+ * a workspace get attached lazily when the agent actually touches a file in
+ * them (see `handlePreToolUse` / `handlePostToolUse` in hooks.ts).
  */
 export function discoverAllGitRoots(cwd?: string): string[] {
   const dir = cwd || process.cwd();
@@ -151,7 +158,7 @@ export function discoverAllGitRoots(cwd?: string): string[] {
 
   const roots: string[] = [];
 
-  // Check common workspace patterns
+  // Known multi-repo workspace patterns
   const workspacePatterns = [
     path.join(dir, '.openclaw', 'workspace'),
     path.join(dir, 'workspace'),
@@ -168,19 +175,6 @@ export function discoverAllGitRoots(cwd?: string): string[] {
       }
     } catch { /* ignore */ }
   }
-
-  // Scan immediate subdirectories
-  try {
-    const entries = fs.readdirSync(dir, { withFileTypes: true });
-    for (const entry of entries) {
-      if (!entry.isDirectory() || entry.name.startsWith('.')) continue;
-      const candidate = path.join(dir, entry.name);
-      if (fs.existsSync(path.join(candidate, '.git'))) {
-        const found = getGitRoot(candidate);
-        if (found && !roots.includes(found)) roots.push(found);
-      }
-    }
-  } catch { /* ignore */ }
 
   return roots;
 }
